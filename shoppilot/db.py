@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS ext_competitor_snapshot (
   comp_key TEXT NOT NULL, comp_name TEXT, sold_count INTEGER, sold_text TEXT, price_min REAL,
   import_id INTEGER, PRIMARY KEY (observed_on, source, my_product_id, comp_key));
 
+-- 外部競品的建議配對（只是建議）：每次計算整批替換；competitors_hash 用來判斷競品清單是不是改過了
+CREATE TABLE IF NOT EXISTS ext_competitor_match (
+  comp_key TEXT NOT NULL, rank INTEGER NOT NULL, my_product_id TEXT NOT NULL, score REAL,
+  scorer TEXT NOT NULL, title_mode TEXT NOT NULL, competitors_hash TEXT NOT NULL, computed_at TEXT NOT NULL,
+  PRIMARY KEY (comp_key, rank));
+
 CREATE TABLE IF NOT EXISTS ai_insight (
   id INTEGER PRIMARY KEY, task TEXT, entity_id TEXT, input_hash TEXT UNIQUE, input_json TEXT,
   output_text TEXT, model TEXT, prompt_version TEXT, tokens_in INTEGER, tokens_out INTEGER,
@@ -244,6 +250,23 @@ def delete_competitor_snapshots(conn, observed_on: str, source: str = "template"
 def read_competitor_snapshots(conn) -> pd.DataFrame:
     return _read(conn, "SELECT observed_on, source, my_product_id, comp_key, comp_name, sold_count, sold_text, "
                        "price_min FROM ext_competitor_snapshot ORDER BY my_product_id, comp_key, observed_on")
+
+
+MATCH_COLS = ["comp_key", "rank", "my_product_id", "score", "scorer", "title_mode", "competitors_hash", "computed_at"]
+
+
+def save_matches(conn, df: pd.DataFrame, scorer: str, title_mode: str, competitors_hash: str,
+                 computed_at: str) -> int:
+    """整批替換建議配對；交易由呼叫端控制。"""
+    conn.execute("DELETE FROM ext_competitor_match")
+    data = df[["comp_key", "rank", "my_product_id", "score"]].assign(
+        scorer=scorer, title_mode=title_mode, competitors_hash=competitors_hash, computed_at=computed_at)
+    conn.executemany(_insert_sql("ext_competitor_match", MATCH_COLS), _rows(data[MATCH_COLS]))
+    return len(data)
+
+
+def read_matches(conn) -> pd.DataFrame:
+    return _read(conn, f"SELECT {', '.join(MATCH_COLS)} FROM ext_competitor_match ORDER BY comp_key, rank")
 
 
 def import_log_rows(conn, limit: int = 100) -> pd.DataFrame:

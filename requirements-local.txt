@@ -2,3 +2,5 @@
 # 有 NVIDIA 顯示卡的話，torch 請改裝 CUDA 版（見 README「本機模型」）
 torch>=2.4
 transformers>=4.56
+# 選用：外部競品自動配對要用 embedding 模型（config/rules.yaml 的 matching.scorer 不是 bigram）才需要
+sentence-transformers>=3.0

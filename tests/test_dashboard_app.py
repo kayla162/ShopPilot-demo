@@ -387,3 +387,31 @@ def test_top_seller_kpi_without_product_code(tmp_path, monkeypatch):
     # 共用（服飾）設定會把【品牌】當成標記拿掉，所以從品名開始；保養品範例設定會保留品牌
     assert metric_value(at, "銷量最高") == "黑鑽極萃逆時髮膜200ml…（19 件）"
     assert next(m for m in at.metric if m.label == "銷量最高").help == "黑鑽極萃逆時髮膜200ml 黑鑽極萃逆時髮膜75ml"
+
+
+def test_match_button_and_mismatch_flag(tmp_path, monkeypatch):
+    """一般模式：沒算過時有按鈕；按下後顯示兩欄；賣家填的商品不在前 3 名要標出來。"""
+    from contextlib import closing
+
+    from shoppilot import db
+    from shoppilot.demo import generate as gen
+
+    files = gen.generate(tmp_path)
+    with closing(db.connect(tmp_path / "shoppilot.db")) as conn:
+        gen.import_demo(conn, files)
+        with conn:     # 把第一個競品的「我的商品」改成另一個商品，讓它一定不在前 3 名
+            first = conn.execute("SELECT id, my_product_id FROM ext_competitor ORDER BY id LIMIT 1").fetchone()
+            other = conn.execute("SELECT product_id FROM fact_catalog_snapshot WHERE product_id != ? LIMIT 1",
+                                 (first[1],)).fetchone()[0]
+            conn.execute("UPDATE ext_competitor SET my_product_id = ? WHERE id = ?", (other, first[0]))
+            # 另一個競品的標題改成和它的商品完全相同，讓它一定排第 1（不依賴設定的計分方式）
+            second = conn.execute("SELECT id, my_product_id FROM ext_competitor WHERE id != ? "
+                                  "ORDER BY id LIMIT 1", (first[0],)).fetchone()
+            name = conn.execute("SELECT product_name FROM fact_catalog_snapshot WHERE product_id = ? LIMIT 1",
+                                (second[1],)).fetchone()[0]
+            conn.execute("UPDATE ext_competitor SET comp_name = ? WHERE id = ?", (name, second[0]))
+    at = run_app(tmp_path, monkeypatch, with_data=False)
+    button = next(b for b in at.button if b.label == "計算建議配對")
+    button.click().run()
+    frame = next(d.value for d in at.dataframe if "建議配對（前 3）" in d.value.columns)
+    assert (frame["是否一致"] == "⚠ 不在前 3 名").any() and frame["是否一致"].str.startswith("第").any()

@@ -12,6 +12,11 @@ peers:
   default_similar_min: 3       # 相似商品有幾個以上，才預設用相似商品比較
   min_pool: 3                  # 比較對象少於這個數字，就加註「僅供參考」
 
+matching:                      # 外部競品自動配對（只是建議，不改任何比較結果）
+  scorer: bigram               # bigram（字元相似度，不用模型）| e5-small | e5-base | bge-m3（要 pip install -r requirements-local.txt）
+  title: raw                   # core：去掉【現貨】、#hashtag 等標記再比對；raw：原樣
+  top_k: 3                     # 每個競品顯示前幾名建議
+
 external_sales:
   align_days: 3                # 外部競品的「已售出」記錄日期，和報表期間開始前一天、最後一天差幾天以內，才拿來推算同期銷量
 

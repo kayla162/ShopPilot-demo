@@ -12,9 +12,52 @@ from dashboard.views import common
 from shoppilot import db, pipeline
 from shoppilot.analytics import competitor_template as ct
 from shoppilot.ingest import detector
+from shoppilot.match import matching
+from shoppilot.match.scorers import MATCH_ERROR_LABELS, MatchError
 
 INCLUDE_TEXT = {"yes": "是", "no": "否"}
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _match_columns(comps: pd.DataFrame, stored: pd.DataFrame, names: dict) -> tuple[list[str], list[str]]:
+    """每個競品的「建議配對（前 3）」和「是否一致」兩欄的文字。"""
+    by_key = {k: g.sort_values("rank") for k, g in stored.groupby("comp_key")}
+    suggested, agree = [], []
+    for key, mine in zip(matching.comp_keys(comps), comps["my_product_id"]):
+        g = by_key.get(key)
+        if g is None:
+            suggested.append("—")
+            agree.append("—")
+            continue
+        suggested.append("；".join(f"{int(r.rank)}. {names.get(r.my_product_id, r.my_product_id)}（{r.score:.2f}）"
+                                  for r in g.itertuples()))
+        hit = g[g["my_product_id"] == mine]
+        agree.append(f"第 {int(hit.iloc[0]['rank'])} 名" if not hit.empty else "⚠ 不在前 3 名")
+    return suggested, agree
+
+
+def _match_section(ctx: common.Ctx, comps: pd.DataFrame) -> pd.DataFrame | None:
+    """讀建議配對；沒算過、過期時顯示說明，非展示模式有「計算建議配對」按鈕。回傳可以顯示的配對（或 None）。"""
+    cfg = matching.match_config(ctx.analysis.rules)
+    with closing(db.connect(ctx.db_path)) as conn:
+        stored = db.read_matches(conn)
+    if not common.demo_mode() and st.button("計算建議配對", key=f"match_btn::{ctx.db_path}"):
+        with st.spinner("計算建議配對中…（第一次用 embedding 模型要下載、載入，可能需要幾分鐘）"):
+            try:
+                with closing(db.connect(ctx.db_path)) as conn:
+                    matching.compute_and_save(conn, ctx.analysis)
+                    stored = db.read_matches(conn)
+            except MatchError as e:
+                st.error(f"無法計算建議配對：{MATCH_ERROR_LABELS.get(e.kind, e.kind)}")
+    if stored.empty:
+        st.info("還沒有計算建議配對。" + ("" if common.demo_mode() else "按「計算建議配對」，系統會依標題找出每個競品最像的前 3 個商品。"))
+        return None
+    first = stored.iloc[0]
+    st.caption(f"建議配對：計分 {first['scorer']}、標題 {first['title_mode']}、計算時間 {first['computed_at']}。"
+               "只是建議，比較時仍以範本填的「我的商品」為準。")
+    if matching.is_stale(stored, comps, cfg):
+        st.warning("建議配對是舊的（競品清單或配對設定改過了），請重新計算。")
+    return stored
 
 
 def render(ctx: common.Ctx) -> None:
@@ -72,11 +115,15 @@ def render(ctx: common.Ctx) -> None:
     if comps.empty:
         st.info("尚未匯入外部競品。")
     else:
-        st.dataframe(pd.DataFrame({
+        stored = _match_section(ctx, comps)
+        table = pd.DataFrame({
             "我的商品": comps["my_product_id"].map(lambda pid: names.get(pid, pid)), "競品名稱": comps["comp_name"],
             "最低價": comps["price_min"], "最高價": comps["price_max"], "已售出（累計）": comps["sold_count"],
             "賣場": comps["shop_name"],
-            "納入設定": comps["include_override"].map(lambda v: INCLUDE_TEXT.get(v, "依相似度"))}), hide_index=True)
+            "納入設定": comps["include_override"].map(lambda v: INCLUDE_TEXT.get(v, "依相似度"))})
+        if stored is not None:
+            table["建議配對（前 3）"], table["是否一致"] = _match_columns(comps, stored, names)
+        st.dataframe(table, hide_index=True)
         st.caption("實際有沒有納入、相似度多少：到「競品分析」分頁選這個商品，比較對象切換成「外部競品」。")
         st.caption("「已售出」是蝦皮顯示的累計銷量，不能直接和你的期間銷量比；每週記一次，系統會用前後兩次的差距推算同期銷量。")
     if not snaps.empty:

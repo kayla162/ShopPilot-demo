@@ -105,3 +105,18 @@ def test_db_version_changes_when_failed_import_is_retried():
         db.delete_import(conn, failed)
         db.log_import(conn, file_name="x.xlsx", file_hash="h", report_type="catalog", status="imported")
     assert db.db_version(conn) != before
+
+
+def test_save_and_read_matches_replaces_whole_table(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    df = pd.DataFrame({"comp_key": ["k1", "k1"], "rank": [1, 2], "my_product_id": ["p1", "p2"], "score": [0.9, 0.5]})
+    with conn:
+        assert db.save_matches(conn, df, "bigram", "core", "h1", "2026-10-27 10:00:00") == 2
+    got = db.read_matches(conn)
+    assert list(got.columns) == db.MATCH_COLS and got["my_product_id"].tolist() == ["p1", "p2"]
+    assert set(got["scorer"]) == {"bigram"} and set(got["competitors_hash"]) == {"h1"}
+    with conn:
+        db.save_matches(conn, df.iloc[:1], "e5-small", "raw", "h2", "2026-10-27 11:00:00")
+    got = db.read_matches(conn)
+    assert len(got) == 1 and got.iloc[0]["scorer"] == "e5-small"
+    conn.close()

@@ -24,6 +24,7 @@ from shoppilot.db import SqliteAICache  # noqa: E402
 from shoppilot.demo import generate as gen  # noqa: E402
 from shoppilot.demo import prewarm  # noqa: E402
 from shoppilot.llm.explainer import ai_status, make_provider  # noqa: E402
+from shoppilot.match.matching import compute_and_save  # noqa: E402
 
 OWNED = ("inbox", "competitors", "shoppilot.db", prewarm.EXAMPLES_FILE)
 
@@ -54,12 +55,14 @@ def build(out: Path, skip_ai: bool, provider=None, log=print) -> int:
     with closing(db.connect(db_file)) as conn:
         results = gen.import_demo(conn, files)
         analysis = Analysis(load_dataset(conn, None), config.load_yaml("keywords"), config.load_yaml("rules"))
+        n_matches = compute_and_save(conn, analysis)      # 線上 demo 不跑模型：配對事先算好存進示範資料庫
     failed = [r for r in results if r.status != "imported"]
     for r in failed:
         log(f"匯入失敗：{r.file_name}（{r.message}）")
     if failed:
         return 1
     log(f"已建立 {db_file}：{len(analysis.regular())} 個一般商品，期間 {analysis.ds.period[0]} ～ {analysis.ds.period[1]}")
+    log(f"建議配對：{n_matches} 筆")
     if skip_ai:
         return 0
     cfg = config.load_yaml("llm")

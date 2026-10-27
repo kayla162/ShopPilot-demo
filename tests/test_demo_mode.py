@@ -185,3 +185,38 @@ def test_cache_only_mode_serves_prewarmed_answers(demo_dir, tmp_path, monkeypatc
     example = next(b for b in at.button if b.key == "qa_example::0")
     example.click().run()
     assert any("快取結果" in c.value for c in at.caption)
+
+
+def test_demo_shows_precomputed_matches_without_loading_models(demo_dir, tmp_path, monkeypatch):
+    import shutil
+
+    from shoppilot.analytics.report import Analysis, load_dataset
+    from shoppilot.match import matching, scorers
+
+    data = tmp_path / "data"
+    shutil.copytree(demo_dir, data)
+    with closing(db.connect(data / "shoppilot.db")) as conn:
+        a = Analysis(load_dataset(conn, None), config.load_yaml("keywords"), config.load_yaml("rules"))
+        matching.compute_and_save(conn, a, scorer=scorers.BigramScorer())
+
+    class Boom:
+        def __init__(self, *a, **k):
+            raise AssertionError("打開頁面不可以建立 embedding 評分器")
+
+    monkeypatch.setattr(scorers, "EmbeddingScorer", Boom)
+    at = run_demo(monkeypatch, data)
+    frames = [d.value for d in at.dataframe if "建議配對（前 3）" in d.value.columns]
+    assert frames and "是否一致" in frames[0].columns
+    assert any(c.value.startswith("建議配對：") for c in at.caption)
+    assert not any(b.label == "計算建議配對" for b in at.button)          # 展示模式不能計算
+
+
+def test_demo_without_matches_explains(demo_dir, tmp_path, monkeypatch):
+    import shutil
+    data = tmp_path / "data"
+    shutil.copytree(demo_dir, data)
+    with closing(db.connect(data / "shoppilot.db")) as conn, conn:
+        conn.execute("DELETE FROM ext_competitor_match")
+    at = run_demo(monkeypatch, data)
+    assert any("還沒有計算建議配對" in i.value for i in at.info)
+    assert not [d for d in at.dataframe if "建議配對（前 3）" in d.value.columns]
