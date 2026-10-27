@@ -2,7 +2,7 @@
 
 把蝦皮賣家中心的報表變成商品層級的競品分析與優化建議；數字全部由程式計算，本機 AI 模型只負責把結果寫成白話。
 
-- **線上 demo（Streamlit Community Cloud）：**（部署後填入）
+- **線上 demo（Streamlit Community Cloud）：** https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/
 - **本機執行：** 見下方[本機執行](#本機執行)
 
 ![總覽](docs/images/overview.png)
