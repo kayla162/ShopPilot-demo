@@ -1,0 +1,7 @@
+*.db filter=lfs diff=lfs merge=lfs -text
+*.xlsx filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.gif filter=lfs diff=lfs merge=lfs -text
+# 容器裡用 sh 執行：Windows 上 clone 也要保持 LF，否則 start.sh 會因為 \r 失敗
+*.sh text eol=lf
+Dockerfile text eol=lf

@@ -1,0 +1,175 @@
+"""AI 問答：資料表內容、商品比對、數字檢查、快取、錯誤處理，以及 Dashboard 只在送出問題時呼叫 AI。"""
+import json
+from pathlib import Path
+
+import pytest
+from streamlit.testing.v1 import AppTest
+
+from shoppilot import db
+from shoppilot.analytics import report
+from shoppilot.llm import qa
+from shoppilot.llm.base import UNAVAILABLE_MSG, LLMError, LLMReply
+from shoppilot.llm.explainer import AIStatus, Explanation
+
+from test_competitor_trend import _seed
+from test_llm_explainer import DictCache
+
+CFG = {"enabled": True, "provider": "local", "prompt_version": "v2"}
+APP = str(Path(__file__).resolve().parents[1] / "dashboard" / "app.py")
+
+
+class Provider:
+    name, model = "fake", "fake-model"
+
+    def __init__(self, text="A9991 本期賣出 10 件，是全店銷量最高的商品。", error=None):
+        self.text, self.error, self.calls = text, error, []
+
+    def generate(self, system, user):
+        self.calls.append((system, user))
+        if self.error:
+            raise self.error
+        return LLMReply(self.text, 300, 40, self.model)
+
+
+@pytest.fixture
+def analysis(kw, rules):
+    conn = db.connect(":memory:")
+    try:
+        _seed(conn)
+        yield report.Analysis(report.load_dataset(conn), kw, rules)
+    finally:
+        conn.close()
+
+
+def _no_perf(analysis, kw, rules):
+    ds = analysis.ds
+    ds.perf = ds.perf.iloc[0:0]
+    return report.Analysis(ds, kw, rules)
+
+
+def _codes(rows):
+    return [r["商品"].split()[0] for r in rows]
+
+
+def test_context_has_shop_data(analysis):
+    ctx = qa.build_qa_context(analysis, "全店表現如何？")
+    assert ctx["資料期間"] == "2026-10-01 ～ 2026-10-07（7 天）" and "缺少的報表" not in ctx
+    assert ctx["全店摘要"]["商品數"] == 2 and ctx["全店摘要"]["期間總銷量"] == 11
+    assert ctx["全店摘要"]["銷量最高的商品"].startswith("A9991")
+    cats = ctx["各類別（依期間總銷量由高到低）"]
+    assert [c["期間總銷量"] for c in cats] == sorted((c["期間總銷量"] for c in cats), reverse=True)
+    assert _codes(ctx["全店銷量最高的商品（由高到低）"]) == ["A9991", "A9994"]
+    assert "問題提到的商品的完整分析" not in ctx
+    assert not any(k.endswith("類銷量最高的商品（由高到低）") for k in ctx)
+    json.dumps(ctx, ensure_ascii=False)
+
+
+def _detail_codes(ctx):
+    return [p["product"]["code"] for p in ctx["問題提到的商品的完整分析"]]
+
+
+def test_context_adds_mentioned_and_selected_products(analysis):
+    ids = dict(zip(analysis.products["code"], analysis.products["product_id"]))
+    assert _detail_codes(qa.build_qa_context(analysis, "a9994 的價格有競爭力嗎？")) == ["A9994"]   # 貨號不分大小寫
+    assert _detail_codes(qa.build_qa_context(analysis, "這個商品要怎麼改？", product_id=ids["A9991"])) == ["A9991"]
+    ctx = qa.build_qa_context(analysis, "A9994 和 A9991 比較", product_id=ids["A9991"])
+    assert _detail_codes(ctx) == ["A9994", "A9991"]                                              # 不重複
+
+
+def test_context_adds_mentioned_category(analysis):
+    cat = analysis.products.iloc[0]["category"]
+    ctx = qa.build_qa_context(analysis, f"{cat}類哪個賣最好？")
+    rows = ctx[f"{cat}類銷量最高的商品（由高到低）"]
+    assert rows and all(r["類別"] == cat for r in rows)
+
+
+def test_context_without_perf_hides_sales(analysis, kw, rules):
+    ctx = qa.build_qa_context(_no_perf(analysis, kw, rules), "A9991 賣得好嗎？")
+    text = json.dumps(ctx, ensure_ascii=False)
+    assert ctx["缺少的報表"] == ["商品表現"] and "全店銷量最高的商品（由高到低）" not in ctx
+    assert "各類別（依商品數由多到少）" in ctx and "期間總銷量" not in text and "期間銷量" not in text
+    # 商品分析裡的銷量、曝光是 null（缺資料），不能是補 0 的數字
+    import re
+    assert not re.search(r'"(?:sales_units|impressions|ctr)":\s*[\d.]', text)
+
+
+def test_answer_ok_then_cached(analysis):
+    provider, cache = Provider(), DictCache()
+    first = qa.answer_question(analysis, "哪個商品賣最好？", None, provider, cache, CFG)
+    second = qa.answer_question(analysis, "哪個商品賣最好？", None, provider, cache, CFG)
+    assert (first.status, second.status, len(provider.calls)) == ("ok", "cached", 1)
+    system, user = provider.calls[0]
+    assert "只能使用 JSON 裡出現的數字" in system and user.endswith("問題：哪個商品賣最好？")
+    assert next(iter(cache.rows.values()))["task"] == "shop_qa"
+
+
+def test_answer_blocks_numbers_not_in_data(analysis):
+    res = qa.answer_question(analysis, "哪個商品賣最好？", None, Provider("A9991 賣了 999 件。"), DictCache(), CFG)
+    assert (res.status, res.reason) == ("blocked", "999")
+
+
+def test_numbers_in_question_are_allowed(analysis):
+    res = qa.answer_question(analysis, "有沒有價格低於 250 元的商品？", None,
+                             Provider("目前的資料沒有低於 250 元的商品。"), DictCache(), CFG)
+    assert res.status == "ok"
+
+
+@pytest.mark.parametrize("question, message", [("", "請輸入問題"), ("   ", "請輸入問題"), ("問" * 201, "問題最多 200 個字")])
+def test_answer_validates_question(analysis, question, message):
+    provider = Provider()
+    res = qa.answer_question(analysis, question, None, provider, DictCache(), CFG)
+    assert (res.status, res.message, provider.calls) == ("unavailable", message, [])
+
+
+@pytest.mark.parametrize("provider, reason", [
+    (None, "AI 文字解釋目前未啟用"), (Provider(error=LLMError("out_of_memory")), "記憶體不足，請改用較小的本機模型"),
+    (Provider(error=RuntimeError("secret sk-123")), "未知錯誤"),
+])
+def test_answer_errors_never_raise(analysis, provider, reason):
+    res = qa.answer_question(analysis, "哪個商品賣最好？", None, provider, DictCache(), CFG)
+    assert (res.status, res.message, res.reason) == ("unavailable", UNAVAILABLE_MSG, reason)
+    assert "sk-123" not in res.message + res.reason
+
+
+def test_answer_survives_broken_analysis():
+    res = qa.answer_question(object(), "哪個商品賣最好？", None, Provider(), DictCache(), CFG)
+    assert (res.status, res.message) == ("unavailable", UNAVAILABLE_MSG)
+
+
+# --- Dashboard ---
+
+def _app(tmp_path, monkeypatch, available=True, calls=None):
+    import dashboard.views.qa_view as qa_view
+    import shoppilot.llm.explainer as explainer
+    monkeypatch.setenv("SHOPPILOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    with db.connect(tmp_path / "shoppilot.db") as conn:
+        _seed(conn)
+    monkeypatch.setattr(explainer, "ai_status", lambda cfg, *a, **k: AIStatus(available, "可使用" if available else "目前未啟用"))
+    monkeypatch.setattr(qa_view, "make_provider", lambda cfg: object())
+    monkeypatch.setattr(qa_view, "answer_question",
+                        lambda *a, **k: (calls.append(a[1]) if calls is not None else None)
+                        or Explanation("ok", text="測試回答：**寶拉** 售價 $230"))
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.run()
+    return at
+
+
+def test_qa_tab_calls_ai_only_on_submit(tmp_path, monkeypatch):
+    calls = []
+    at = _app(tmp_path, monkeypatch, calls=calls)
+    assert not at.exception and at.tabs[-1].label == "AI 問答"
+    assert calls == []                                           # 打開頁面、切換分頁都不呼叫
+    at.chat_input[0].set_value("哪個商品賣最好？").run()
+    assert calls == ["哪個商品賣最好？"]
+    assert [m.name for m in at.chat_message] == ["user", "assistant"]
+    answer = next(m.value for m in at.markdown if "測試回答" in m.value)
+    assert "**" not in answer and r"\$230" in answer             # 加粗拿掉、$ 跳脫（不會變成數學式）
+    at.run()                                                     # 重新整理：對話還在，不會再呼叫
+    assert calls == ["哪個商品賣最好？"] and len(at.chat_message) == 2
+
+
+def test_qa_tab_disabled_without_ai(tmp_path, monkeypatch):
+    at = _app(tmp_path, monkeypatch, available=False)
+    assert not at.exception and at.chat_input[0].disabled
+    assert any("目前未啟用" in i.value for i in at.info)

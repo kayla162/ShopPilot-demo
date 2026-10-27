@@ -1,0 +1,104 @@
+"""線上 demo 的預先跑好的 AI：挑幾個商品跑「AI 分析」、挑幾個範例問題跑「AI 問答」，結果寫進正式的 AI 快取。
+
+全部走正式路徑（explain_product、answer_question），經過同樣的數字檢查，不是寫死的假答案。
+範例問題只收評分為「答對」的題目；同一種題型的題目都沒答對，就跳過這種題型。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from shoppilot.analytics.products import selection_order
+from shoppilot.llm.explainer import explain_product
+from shoppilot.llm.qa import answer_question
+from shoppilot.llm.qa_eval import generate_questions, grade
+
+EXAMPLE_KINDS = ("category_top", "shop_top", "todo_first", "category_best", "price", "absent")
+EXAMPLES_FILE = "examples.json"
+OK = ("ok", "cached")
+
+
+@dataclass
+class PrewarmResult:
+    product_id: str
+    explained: list[str] = field(default_factory=list)
+    failed_products: list[str] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)
+    skipped_kinds: list[str] = field(default_factory=list)
+
+
+def _usable(analysis, pid: str) -> bool:
+    pa = analysis.product(pid)
+    pool = pa.get("default_pool")
+    return bool(pool) and ((pa.get("pools") or {}).get(pool) or {}).get("count", 0) > 0
+
+
+def pick_products(analysis, n: int = 5) -> list[str]:
+    """預設選中的商品，再依序補：建議最多、缺貨比例最高、同類中最貴、有外部競品。都要有比較對象。"""
+    reg = analysis.regular()
+    default = next(pid for pid in selection_order(analysis.products) if _usable(analysis, pid))
+    median = reg.groupby("category")["price"].transform("median")
+    competed = set(analysis.ds.competitors["my_product_id"]) if not analysis.ds.competitors.empty else set()
+    orders = [
+        sorted(reg["product_id"], key=lambda pid: -len(analysis.suggestions.get(pid, []))),
+        reg.sort_values("stockout_ratio", ascending=False)["product_id"].tolist(),
+        reg.assign(r=reg["price"] / median).sort_values("r", ascending=False)["product_id"].tolist(),
+        reg[reg["product_id"].isin(competed)].sort_values("units", ascending=False)["product_id"].tolist(),
+    ]
+    picked = [default]
+    for order in orders:
+        pid = next((p for p in order if p not in picked and _usable(analysis, p)), None)
+        if pid:
+            picked.append(pid)
+    for pid in selection_order(analysis.products):           # 不夠 n 個時，依選單順序補
+        if len(picked) >= n:
+            break
+        if pid not in picked and _usable(analysis, pid):
+            picked.append(pid)
+    return picked[:n]
+
+
+def prewarm(analysis, provider, cache, cfg: dict, log=print) -> PrewarmResult:
+    picked = pick_products(analysis)
+    result = PrewarmResult(product_id=picked[0])
+    for pid in picked:
+        pa = analysis.product(pid)
+        r = explain_product(pa, pa["default_pool"], provider, cache, cfg)
+        (result.explained if r.status in OK else result.failed_products).append(pid)
+        log(f"AI 分析 {pid}：{r.status} {r.reason}")
+    by_kind: dict[str, list] = {}
+    for q in generate_questions(analysis):
+        by_kind.setdefault(q.kind, []).append(q)
+    for kind in EXAMPLE_KINDS:
+        chosen = None
+        for q in by_kind.get(kind, []):
+            # 畫面上點範例問題時固定帶預設商品（側欄選的商品會放進問答的資料表），快取才對得上
+            r = answer_question(analysis, q.question, result.product_id, provider, cache, cfg)
+            verdict = grade(q, r.status, r.text)
+            log(f"範例問題（{kind}）{q.question}：{r.status}／{verdict}")
+            if verdict == "correct":
+                chosen = q.question
+                break
+        if chosen:
+            result.questions.append(chosen)
+        else:
+            result.skipped_kinds.append(kind)
+    return result
+
+
+def write_examples(path: Path, result: PrewarmResult) -> None:
+    data = {"product_id": result.product_id, "questions": result.questions}
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def read_examples(path: Path) -> dict | None:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("product_id"), str) \
+            or not isinstance(data.get("questions"), list) \
+            or not all(isinstance(q, str) for q in data["questions"]):
+        return None
+    return data

@@ -1,0 +1,7 @@
+# 公開版（Streamlit Community Cloud、Docker）：不送使用統計、工具列只留基本選項。
+# 私人版的 address = "localhost" 不放在這裡，雲端主機才連得到。
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

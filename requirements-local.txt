@@ -1,0 +1,4 @@
+# 選用：要用本機 Hugging Face 模型（config/llm.yaml 的 provider: local）才需要安裝
+# 有 NVIDIA 顯示卡的話，torch 請改裝 CUDA 版（見 README「本機模型」）
+torch>=2.4
+transformers>=4.56

@@ -1,0 +1,57 @@
+# 規則門檻與參數。改完存檔，Dashboard 重新整理就會套用。
+
+inventory:
+  preorder_bases: [10, 100, 300, 500]     # 預購設定值（賣家確認：庫存從設定值起算，每賣 1 件減 1）
+  preorder_window_bases: [100, 300, 500]  # 庫存落在這些設定值附近，就視為預購規格
+  preorder_window: 10                     # 「附近」＝ 設定值 − 10 < 庫存 ≤ 設定值
+
+peers:
+  similar_threshold: 0.25      # 自家相似商品門檻（2026-09-30 用 9 月資料校準：≥0.40 是同款，0.25–0.40 是相近款式）
+  similar_top_n: 5             # 相似商品最多取幾個
+  external_threshold: 0        # 外部競品門檻：0 = 範本裡的競品都納入，「納入計算」填「否」才排除（2026-10-16 用賣家填好的範本校準：確認是同款的競品，標題相似度只有 0.02–0.14）
+  default_similar_min: 3       # 相似商品有幾個以上，才預設用相似商品比較
+  min_pool: 3                  # 比較對象少於這個數字，就加註「僅供參考」
+
+external_sales:
+  align_days: 3                # 外部競品的「已售出」記錄日期，和報表期間開始前一天、最後一天差幾天以內，才拿來推算同期銷量
+
+market:
+  price_band_edges: [0, 200, 300, 400, 500]   # 價格帶邊界；最後一帶是 ≥ 500
+  dominated_share: 0.5                        # 單一商品占價格帶銷量超過這個比例，就標示「主要來自單一商品」
+  significance: 0.05
+
+exposure:
+  min_group: 10          # 每一組至少幾個商品才比較
+  significance: 0.05     # 校正後 p 值門檻
+
+title:
+  max_len: 60                  # 蝦皮標題字數上限（賣家確認）
+
+keywords:
+  min_products: 5              # 全店關鍵字表現：至少幾個一般商品使用才列入
+  significance: 0.05
+  competitor_min: 3            # 外部競品至少幾個，才計算「競品常用詞」
+  competitor_share: 0.3        # 在多少比例的競品標題中出現，才列入
+
+baselines:
+  ctr_min_impressions: 300     # 點擊率基準只算曝光 ≥ 300 的商品
+  exclude_top_sellers: 1       # 點擊轉換、加購、跳出的基準排除銷量前 N 名
+
+suggestions:
+  bestseller_min_units: 1      # 暢銷規格缺貨：本期賣出 ≥ 1 件
+  bestseller_min_atc: 3        #   或加購 ≥ 3 件
+  sold_out_ratio: 0.5          # 缺貨規格過半
+  sold_out_min_impressions: 300
+  expected_orders_min: 3       # 預期訂單 ≥ 3 才判定「0 訂單」有問題（0 單的偶然機率 ≤ 5%）
+  ctr_min_impressions: 300
+  z_threshold: 2
+  no_atc_prob: 0.05            # 0 加購的偶然機率 < 5% 才判定
+  bounce_min_visitors: 30
+  title_overhead_ratio: 0.6
+  title_room_max_len: 45
+  desc_spec_min_len: 150
+  star_min_orders: 3
+  star_p: 0.01
+  preorder_hot_min: 3
+  shop_wide_ratio: 0.5         # 同一條規則觸發 ≥ 50% 的一般商品 → 重點建議只列一條全店項目
+  top_n: 5                     # 本期重點建議的條數

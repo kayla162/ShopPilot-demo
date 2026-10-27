@@ -1,0 +1,5 @@
+# docker build 不需要的檔案
+.git
+.pytest_cache
+**/__pycache__
+.shoppilot-public
