@@ -19,6 +19,7 @@ import openpyxl
 from shoppilot import config, pipeline
 from shoppilot.analytics import competitor_template as ct
 from shoppilot.ingest import parsers
+from shoppilot.transform.title import core_title
 
 SHOP_NO = "900000001"
 DEFAULT_TODAY = date(2026, 10, 1)
@@ -275,7 +276,18 @@ def write_perf(path: Path, rows: list[list]) -> None:
     wb.save(path)
 
 
-def _competitor_rows(rng, products: list[DemoProduct]) -> list[dict]:
+def _competitor_name(name_rng, title: str, n: int, kw: dict) -> str:
+    """從商品標題（去掉標記、行銷語後）挑 2–3 個詞當競品名稱，像真的同款商品；最後一個詞（品類）一定保留。"""
+    words = core_title(title, kw).split() or title.split()
+    head, noun = words[:-1], words[-1]
+    k = min(len(head), int(name_rng.integers(1, 3)))
+    picked = [head[int(i)] for i in sorted(name_rng.choice(len(head), size=k, replace=False))] if k else []
+    return " ".join(picked + [noun]) + f" 示範競品 {n}"
+
+
+def _competitor_rows(rng, products: list[DemoProduct], name_rng=None, kw: dict | None = None) -> list[dict]:
+    name_rng = name_rng if name_rng is not None else np.random.default_rng(0)
+    kw = kw if kw is not None else config.load_yaml("keywords")
     regular = [p for p in products if not p.special]
     chosen = [regular[int(i)] for i in sorted(rng.choice(len(regular), size=N_COMPETED, replace=False))]
     out = []
@@ -284,7 +296,7 @@ def _competitor_rows(rng, products: list[DemoProduct]) -> list[dict]:
         for _ in range(int(rng.integers(1, 4))):
             n = len(out) + 1
             sold = int(rng.integers(50, 3000))
-            out.append({"pid": p.pid, "name": f"{p.title.split()[-1]} 同款 示範競品 {n}",
+            out.append({"pid": p.pid, "name": _competitor_name(name_rng, p.title, n, kw),
                         "price": _round_price(base * rng.uniform(0.8, 1.25)), "sold_before": sold,
                         "sold_after": sold + int(rng.integers(5, 200)), "shop": f"示範競品賣場 {n % 7 + 1}",
                         "url": f"https://example.com/demo-competitor/{n}", "include": None})
@@ -321,7 +333,7 @@ def generate(out_dir: Path, seed: int = 42, today: date = DEFAULT_TODAY) -> Demo
     write_catalog(catalog, products)
     write_skus(skus, products)
     write_perf(perf, _perf_rows(rng, products))
-    comp_rows = _competitor_rows(rng, products)
+    comp_rows = _competitor_rows(rng, products, np.random.default_rng(seed + 2))  # 名稱用另一個亂數，不影響其他數字
     competitors = []
     for day, key in ((start - timedelta(days=1), "sold_before"), (end, "sold_after")):
         path = comp_dir / ct.template_file_name(day)

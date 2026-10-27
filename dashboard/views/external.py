@@ -19,8 +19,9 @@ INCLUDE_TEXT = {"yes": "是", "no": "否"}
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _match_columns(comps: pd.DataFrame, stored: pd.DataFrame, names: dict) -> tuple[list[str], list[str]]:
-    """每個競品的「建議配對（前 3）」和「是否一致」兩欄的文字。"""
+def _match_columns(comps: pd.DataFrame, stored: pd.DataFrame, names: dict,
+                   top_k: int = 3) -> tuple[list[str], list[str]]:
+    """每個競品的「建議配對（前 N）」和「是否一致」兩欄的文字。"""
     by_key = {k: g.sort_values("rank") for k, g in stored.groupby("comp_key")}
     suggested, agree = [], []
     for key, mine in zip(matching.comp_keys(comps), comps["my_product_id"]):
@@ -32,7 +33,7 @@ def _match_columns(comps: pd.DataFrame, stored: pd.DataFrame, names: dict) -> tu
         suggested.append("；".join(f"{int(r.rank)}. {names.get(r.my_product_id, r.my_product_id)}（{r.score:.2f}）"
                                   for r in g.itertuples()))
         hit = g[g["my_product_id"] == mine]
-        agree.append(f"第 {int(hit.iloc[0]['rank'])} 名" if not hit.empty else "⚠ 不在前 3 名")
+        agree.append(f"第 {int(hit.iloc[0]['rank'])} 名" if not hit.empty else f"⚠ 不在前 {top_k} 名")
     return suggested, agree
 
 
@@ -49,8 +50,10 @@ def _match_section(ctx: common.Ctx, comps: pd.DataFrame) -> pd.DataFrame | None:
                     stored = db.read_matches(conn)
             except MatchError as e:
                 st.error(f"無法計算建議配對：{MATCH_ERROR_LABELS.get(e.kind, e.kind)}")
+            except Exception:  # noqa: BLE001 — 其他錯誤也不讓整頁壞掉、不顯示 traceback
+                st.error("無法計算建議配對，其他功能不受影響。")
     if stored.empty:
-        st.info("還沒有計算建議配對。" + ("" if common.demo_mode() else "按「計算建議配對」，系統會依標題找出每個競品最像的前 3 個商品。"))
+        st.info("還沒有計算建議配對。" + ("" if common.demo_mode() else f"按「計算建議配對」，系統會依標題找出每個競品最像的前 {int(cfg['top_k'])} 個商品。"))
         return None
     first = stored.iloc[0]
     st.caption(f"建議配對：計分 {first['scorer']}、標題 {first['title_mode']}、計算時間 {first['computed_at']}。"
@@ -122,7 +125,8 @@ def render(ctx: common.Ctx) -> None:
             "賣場": comps["shop_name"],
             "納入設定": comps["include_override"].map(lambda v: INCLUDE_TEXT.get(v, "依相似度"))})
         if stored is not None:
-            table["建議配對（前 3）"], table["是否一致"] = _match_columns(comps, stored, names)
+            top_k = int(matching.match_config(ctx.analysis.rules)["top_k"])
+            table[f"建議配對（前 {top_k}）"], table["是否一致"] = _match_columns(comps, stored, names, top_k)
         st.dataframe(table, hide_index=True)
         st.caption("實際有沒有納入、相似度多少：到「競品分析」分頁選這個商品，比較對象切換成「外部競品」。")
         st.caption("「已售出」是蝦皮顯示的累計銷量，不能直接和你的期間銷量比；每週記一次，系統會用前後兩次的差距推算同期銷量。")

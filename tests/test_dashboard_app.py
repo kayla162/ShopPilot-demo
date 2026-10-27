@@ -401,13 +401,13 @@ def test_match_button_and_mismatch_flag(tmp_path, monkeypatch):
         gen.import_demo(conn, files)
         with conn:     # 把第一個競品的「我的商品」改成另一個商品，讓它一定不在前 3 名
             first = conn.execute("SELECT id, my_product_id FROM ext_competitor ORDER BY id LIMIT 1").fetchone()
-            other = conn.execute("SELECT product_id FROM fact_catalog_snapshot WHERE product_id != ? LIMIT 1",
+            other = conn.execute("SELECT product_id FROM fact_catalog_snapshot WHERE product_id != ? ORDER BY product_id LIMIT 1",
                                  (first[1],)).fetchone()[0]
             conn.execute("UPDATE ext_competitor SET my_product_id = ? WHERE id = ?", (other, first[0]))
             # 另一個競品的標題改成和它的商品完全相同，讓它一定排第 1（不依賴設定的計分方式）
             second = conn.execute("SELECT id, my_product_id FROM ext_competitor WHERE id != ? "
                                   "ORDER BY id LIMIT 1", (first[0],)).fetchone()
-            name = conn.execute("SELECT product_name FROM fact_catalog_snapshot WHERE product_id = ? LIMIT 1",
+            name = conn.execute("SELECT product_name FROM fact_catalog_snapshot WHERE product_id = ? ORDER BY rowid LIMIT 1",
                                 (second[1],)).fetchone()[0]
             conn.execute("UPDATE ext_competitor SET comp_name = ? WHERE id = ?", (name, second[0]))
     at = run_app(tmp_path, monkeypatch, with_data=False)

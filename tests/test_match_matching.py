@@ -75,3 +75,22 @@ def test_compute_and_save_writes_table(tmp_path):
     conn.close()
     assert n == 4 and len(stored) == 4
     assert set(stored["scorer"]) == {"bigram"} and set(stored["competitors_hash"]) == {matching.competitors_hash(COMPS)}
+
+
+def test_demo_competitors_match_their_own_product(tmp_path):
+    """示範競品名稱取自商品標題的特徵詞：用設定的 bigram＋raw，至少 80% 的競品自己的商品在前 3 名。"""
+    from contextlib import closing
+
+    from shoppilot import config, db
+    from shoppilot.analytics.report import Analysis, load_dataset
+    from shoppilot.demo import generate as gen
+
+    files = gen.generate(tmp_path)
+    with closing(db.connect(tmp_path / "shoppilot.db")) as conn:
+        gen.import_demo(conn, files)
+        analysis = Analysis(load_dataset(conn, None), config.load_yaml("keywords"), config.load_yaml("rules"))
+    comps = analysis.ds.competitors
+    out = matching.suggest(analysis, BigramScorer(), {**matching.MATCH_DEFAULTS, "title": "raw", "top_k": 3})
+    mine = dict(zip(matching.comp_keys(comps), comps["my_product_id"]))
+    hits = {k for k, g in out.groupby("comp_key") if mine[k] in set(g["my_product_id"])}
+    assert len(mine) >= 20 and len(hits) / len(mine) >= 0.8
