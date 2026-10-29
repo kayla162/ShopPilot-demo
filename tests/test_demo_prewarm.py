@@ -86,6 +86,17 @@ def test_wrong_answers_are_not_examples(analysis):
     assert not any("價格是多少" in q for q in result.questions)
 
 
+def test_wrong_answers_are_not_cached(analysis):
+    # 線上 demo 只讀快取：答錯的留在快取裡，訪客打同一題就會拿到錯的答案
+    qs = generate_questions(analysis)
+    cache = DictCache()
+    prewarm.prewarm(analysis, AnswerKeyProvider(qs, wrong_kinds={"price"}), cache,
+                    {"prompt_version": "v2"}, log=lambda *_: None)
+    qa_inputs = [row["input_json"] for row in cache.rows.values() if row["task"] == "shop_qa"]
+    assert not any("價格是多少" in text for text in qa_inputs)
+    assert len(qa_inputs) == len(prewarm.EXAMPLE_KINDS) - 1          # 答對的照樣留著
+
+
 def test_read_examples_handles_bad_files(tmp_path):
     assert prewarm.read_examples(tmp_path / "missing.json") is None
     (tmp_path / "bad.json").write_text("{", encoding="utf-8")

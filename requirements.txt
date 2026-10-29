@@ -1,8 +1,10 @@
-pandas>=2.2
-openpyxl>=3.1,<3.2
-pyyaml>=6.0
-numpy>=1.26
-scipy>=1.11
-streamlit>=1.40
-plotly>=5.19
-pytest>=8.0
+# 固定版本：Streamlit Community Cloud 每次重新部署都會重裝套件，固定下來才不會裝到不相容的新版。
+# 這組版本在乾淨的 Python 3.13 環境（只裝這個檔案）跑過全部測試；GitHub Actions 每次 push 也用它測試。
+pandas==3.1.0
+openpyxl==3.1.5
+pyyaml==6.0.3
+numpy==2.5.4
+scipy==1.18.1
+streamlit==1.66.1
+plotly==7.1.0
+pytest==9.2.0

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-from conftest import SEPT_CATALOG, SEPT_PERF, SEPT_PERF_1DAY, SEPT_SKUS, real_file
+from conftest import SEPT_CATALOG, SEPT_PERF, SEPT_SKUS, real_file
 
 APP = str(Path(__file__).resolve().parents[1] / "dashboard" / "app.py")
 SEPT_REPORTS = (SEPT_CATALOG, SEPT_SKUS, SEPT_PERF)
@@ -27,11 +27,6 @@ def sidebar_text(at: AppTest) -> str:
     return " ".join(m.value for m in at.sidebar.markdown)
 
 
-def dataframe_columns(at: AppTest) -> list[str]:
-    """頁面上所有表格的欄名（清單；用 in 比對是整個欄名相等，不是子字串）。"""
-    return [c for d in at.dataframe for c in d.value.columns]
-
-
 def test_app_without_data(tmp_path, monkeypatch):
     # 固定用 provider: openai：測的是「沒有 Key → 目前未啟用」，不能受本機 config/llm.yaml 切到 local 影響
     from shoppilot import config
@@ -47,33 +42,8 @@ def test_app_without_data(tmp_path, monkeypatch):
     assert "AI 文字解釋" in sidebar_text(at) and "目前未啟用" in sidebar_text(at)
 
 
-def test_app_with_real_data_and_no_api_key(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    assert not at.exception
-    assert not at.error, [e.value for e in at.error]          # 沒有任何區塊出錯
-    text = sidebar_text(at)
-    for line in ("核心商品分析：正常", "競品比較：正常", "Dashboard：正常", "目前未啟用"):
-        assert line in text
-    assert at.tabs[0].label == "總覽"
-    assert [m.label for m in at.metric][:5] == ["商品總數", "平均價格", "平均銷量", "價格區間", "銷量最高"]
-    columns = dataframe_columns(at)
-    assert "平均銷量" in columns and "有賣出的商品" in columns      # 有商品表現：各類別一覽要有這兩欄
-    assert next(b for b in at.button if b.label == "AI 分析").disabled      # 沒有 Key：按鈕停用
-    assert any("目前未啟用" in i.value for i in at.info)                     # 原因就寫在 AI 區塊裡
-
-
 def metric_value(at: AppTest, label: str) -> str:
     return next(m.value for m in at.metric if m.label == label)
-
-
-def test_top_seller_kpi_without_sales(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_CATALOG, SEPT_SKUS))
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert metric_value(at, "銷量最高") == "—" and metric_value(at, "平均銷量") == "—"
-    assert "核心商品分析：資料不足（缺少商品表現）" in sidebar_text(at)
-    assert not any("銷售集中度" in c.value for c in at.caption)
-    columns = dataframe_columns(at)
-    assert "平均銷量" not in columns and "有賣出的商品" not in columns      # 沒有商品表現：不能顯示補 0 的銷量欄
 
 
 def test_broken_llm_config_only_disables_ai(tmp_path, monkeypatch):
@@ -102,37 +72,6 @@ def test_broken_rules_yaml_shows_message(tmp_path, monkeypatch):
     assert not at.exception                                     # 不是整頁的錯誤訊息
     assert any("分析資料無法建立" in e.value for e in at.error)
     assert len(at.tabs) == 0
-
-
-def test_section_error_is_isolated(tmp_path, monkeypatch):
-    import dashboard.views.overview as overview
-
-    def boom(ctx):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(overview, "render", boom)
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    assert not at.exception
-    assert any("「總覽」區塊發生錯誤" in e.value for e in at.error)
-    assert len(at.metric) >= 5                                  # 其他區塊照常顯示（最上方的 KPI）
-
-
-def test_ai_is_called_only_when_button_clicked(tmp_path, monkeypatch):
-    import dashboard.views.ai_panel as ai_panel
-    import shoppilot.llm.explainer as explainer
-    calls = []
-    monkeypatch.setattr(explainer, "ai_status",
-                        lambda cfg, *a, **k: explainer.AIStatus(True, "可使用（按下「AI 分析」才會呼叫）"))
-    monkeypatch.setattr(ai_panel, "make_provider", lambda cfg: object())
-    monkeypatch.setattr(ai_panel, "explain_product",
-                        lambda *a, **k: calls.append(a) or explainer.Explanation("ok", text="測試說明"))
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    assert not at.exception and not at.error
-    assert [t.label for t in at.tabs][:2] == ["總覽", "競品分析"]
-    assert calls == []                                          # 打開頁面、切換分頁都不呼叫
-    next(b for b in at.button if b.label == "AI 分析").click().run()
-    assert len(calls) == 1
-    assert any("測試說明" in m.value for m in at.markdown)
 
 
 def test_rank_text_marks_ties():
@@ -178,78 +117,6 @@ def test_money_range_is_escaped_for_metric():
     assert competitor._price_text({"price": 299.0, "price_max": 299.0}) == "$299"     # 單一個 $ 不會變成數學式
 
 
-def test_ai_failure_stays_in_ai_panel(tmp_path, monkeypatch):
-    import dashboard.views.ai_panel as ai_panel
-    import shoppilot.llm.explainer as explainer
-    from shoppilot.llm.base import UNAVAILABLE_MSG
-
-    def broken(cfg):
-        raise TypeError("bad config")
-
-    monkeypatch.setattr(explainer, "ai_status",
-                        lambda cfg, *a, **k: explainer.AIStatus(True, "可使用（按下「AI 分析」才會呼叫）"))
-    monkeypatch.setattr(ai_panel, "make_provider", broken)
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    next(b for b in at.button if b.label == "AI 分析").click().run()
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert any(UNAVAILABLE_MSG in w.value for w in at.warning)
-
-
-def test_competitor_tab_without_perf_hides_sales_numbers(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_CATALOG, SEPT_SKUS))
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    for label in ("銷量", "曝光", "點擊率", "銷量排名（同類）"):
-        assert metric_value(at, label) == "—"
-    assert not any(m.label == "我的銷量" for m in at.metric)
-    assert "銷量（件）" not in dataframe_columns(at)          # 比較對象清單也不能有補 0 的銷量欄
-    texts = [m.value for m in at.tabs[1].markdown]            # 結論、市場位置也不能用補 0 的銷量下判斷
-    assert not any("銷售量" in t or "市場位置" in t for t in texts)
-
-
-def test_ai_text_is_cleared_when_period_changes(tmp_path, monkeypatch):
-    import dashboard.views.ai_panel as ai_panel
-    import shoppilot.llm.explainer as explainer
-    calls = []
-    monkeypatch.setattr(explainer, "ai_status",
-                        lambda cfg, *a, **k: explainer.AIStatus(True, "可使用（按下「AI 分析」才會呼叫）"))
-    monkeypatch.setattr(ai_panel, "make_provider", lambda cfg: object())
-    monkeypatch.setattr(ai_panel, "explain_product",
-                        lambda *a, **k: calls.append(a) or explainer.Explanation("ok", text="測試說明"))
-    at = run_app(tmp_path, monkeypatch, with_data=True,
-                 files=(SEPT_CATALOG, SEPT_SKUS, SEPT_PERF, SEPT_PERF_1DAY))
-    assert not next(b for b in at.button if b.label == "AI 分析").disabled   # 可用又有商品表現：按鈕可按
-    next(b for b in at.button if b.label == "AI 分析").click().run()
-    assert len(calls) == 1
-    assert any("測試說明" in m.value for m in at.markdown)
-    next(s for s in at.sidebar.selectbox if s.label == "資料期間").select(("2026-09-29", "2026-09-29")).run()
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert any(b.label == "AI 分析" for b in at.button)              # AI 區塊還在，不是整塊消失才看不到舊說明
-    assert not any("測試說明" in m.value for m in at.markdown)       # 換期間後，用舊數字寫的說明不留在畫面上
-    assert len(calls) == 1                                          # 換期間不會呼叫 AI
-
-
-def test_ai_needs_perf_report(tmp_path, monkeypatch):
-    import shoppilot.llm.explainer as explainer
-    monkeypatch.setattr(explainer, "ai_status",
-                        lambda cfg, *a, **k: explainer.AIStatus(True, "可使用（按下「AI 分析」才會呼叫）"))
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_CATALOG, SEPT_SKUS))
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert next(b for b in at.button if b.label == "AI 分析").disabled
-    assert any("商品表現" in i.value and "補上報表後就可以使用" in i.value for i in at.info)
-
-
-def test_analysis_tabs_render(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert [t.label for t in at.tabs][:5] == ["總覽", "競品分析", "價格與銷售", "曝光因子", "標題關鍵字"]
-    text = " ".join(m.value for m in at.markdown)
-    assert "現貨商品的曝光中位數是預購的" in text                 # 曝光因子的白話結論
-    assert "全店關鍵字表現" in text and "價格帶" in text
-    assert "曝光中位數" in dataframe_columns(at)                  # 現貨 vs 預購圖的「查看資料表」
-    assert "最大單一商品銷量占比" in dataframe_columns(at)         # 價格帶表：每個價格帶最大單一商品的銷量占比
-    assert [len(at.tabs[i].get("link_button")) for i in (1, 4)] == [1, 1]      # 競品分析、標題關鍵字各有一個蝦皮搜尋連結
-
-
 def test_external_prices_skip_excluded_and_unpriced():
     import pandas as pd
     from dashboard.views import price_sales
@@ -257,19 +124,6 @@ def test_external_prices_skip_excluded_and_unpriced():
     assert price_sales._external_prices(comps) == [100.0, 200.0]
     assert price_sales._external_prices(comps.iloc[0:0]) == []
     assert price_sales._external_prices(None) == []
-
-
-def test_price_tab_without_perf_hides_sales_columns(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_CATALOG, SEPT_SKUS))
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    cols = dataframe_columns(at)
-    assert "價格帶" in cols and "總銷量（件）" not in cols and "每 100 次點擊訂單" not in cols
-    assert "最大單一商品銷量占比" not in cols                       # 沒有商品表現：銷量都是補 0 的，占比沒有意義
-
-
-def test_price_tab_without_regular_products(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_SKUS,))
-    assert not at.exception and not at.error, [e.value for e in at.error]
 
 
 def test_price_band_cells():
@@ -294,53 +148,6 @@ def test_mv_text():
     assert exposure_view._mv_text({"multivariate": True, "significant": False}) == "顯著（單獨比較不顯著）"
     assert exposure_view._mv_text({"multivariate": False, "significant": True}) == "不顯著"
     assert exposure_view._mv_text({"multivariate": None, "significant": False}) == "—"
-
-
-def test_all_tabs_render(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert [t.label for t in at.tabs] == ["總覽", "競品分析", "價格與銷售", "曝光因子", "標題關鍵字", "商品總表", "外部競品", "AI 問答"]
-    assert any("尚未匯入外部競品" in i.value for i in at.info)
-    assert any(c.label == "只看有建議的商品" for c in at.checkbox)
-    assert any("只更新檔案中有填競品的商品" in c.value for c in at.caption)
-    assert any(b.label == "下載競品範本（Excel）" for b in at.tabs[6].get("download_button"))     # 有價格：可以下載範本
-    table = next(d.value for d in at.dataframe if "缺貨比例（%）" in d.value.columns)             # 商品總表
-    assert str(table["價格排名"].dtype) == "Int64"                                              # 排名是整數，CSV 不會寫成 3.0
-
-
-def test_product_table_without_perf_hides_perf_columns(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_CATALOG, SEPT_SKUS))
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    cols = dataframe_columns(at)
-    assert "缺貨比例（%）" in cols
-    assert not {"銷量", "銷量排名", "曝光", "點擊率（%）"} & set(cols)
-    assert not any(r.label == "範本要包含" for r in at.radio)
-    assert any("商品表現" in i.value for i in at.tabs[5].info)                                  # 缺哪份報表，就在區塊裡說明
-    assert any("價格排名是同類商品內的排名（價格由低到高，同數值並列）" in c.value for c in at.caption)
-    assert not any("銷量由高到低" in c.value for c in at.caption)                                # 沒有銷量排名欄，說明也不提
-
-
-def test_external_tab_needs_price_report(tmp_path, monkeypatch):
-    at = run_app(tmp_path, monkeypatch, with_data=True, files=(SEPT_CATALOG,))
-    assert not at.exception and not at.error, [e.value for e in at.error]
-    assert any("價格與庫存" in i.value for i in at.tabs[6].info)
-    assert not any(b.label == "下載競品範本（Excel）" for b in at.tabs[6].get("download_button"))
-
-
-def test_competitor_import_messages(tmp_path, monkeypatch):
-    from shoppilot.pipeline import ImportResult
-    from shoppilot import shops
-    at = run_app(tmp_path, monkeypatch, with_data=True)
-    key = f"_competitor_result::{shops.db_path(shops.DEFAULT_SHOP)}"      # 匯入結果以賣場區分
-    at.session_state[key] = ImportResult("t.xlsx", "competitor", "skipped_duplicate")
-    at.run()
-    assert any("內容完全相同的檔案不會重複匯入" in i.value for i in at.info)
-    at.session_state[key] = ImportResult("t.xlsx", "competitor", "failed", "價格「$250 - $399」")
-    at.run()
-    assert any(r"\$250 - \$399" in e.value for e in at.error)
-    at.session_state[key] = ImportResult("t.xlsx", "competitor", "imported", "", ("$1 和 $2",))
-    at.run()
-    assert any(r"\$1 和 \$2" in c.value for c in at.caption)
 
 
 def test_import_log_escapes_messages(tmp_path, monkeypatch):

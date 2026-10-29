@@ -1,7 +1,8 @@
 """AI 問答（選用）：賣家輸入問題，AI 只根據程式算好的賣場資料回答。
 
 小模型讀不了整個資料庫，所以每個問題只送一份精簡的「資料表」（約 2–4 千字）：
-全店摘要、各類別、本期重點建議、銷量前幾名，以及問題裡提到的商品（貨號、商品名稱、類別）和側欄選的商品。
+全店摘要、各類別、本期重點建議、銷量前幾名，以及問題裡提到的商品（貨號、商品名稱、類別）；
+問題問到「這個商品」時再加上側欄選的商品。
 回覆一樣要通過數字檢查：資料和問題裡都沒有的數字就擋下，不顯示。
 """
 from __future__ import annotations
@@ -16,12 +17,19 @@ from shoppilot.llm.explainer import (
 )
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa.md"
-QA_VERSION = "qa2"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
+QA_VERSION = "qa3"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
 MAX_QUESTION_LEN = 200
 TOP_SELLERS = 10
-MAX_PRODUCTS = 3            # 問題裡提到的商品最多附幾個完整分析（加上側欄選的商品）
+MAX_PRODUCTS = 3            # 問題裡提到的商品最多附幾個完整分析（問到「這個商品」時再加上側欄選的商品）
 CATEGORY_PRODUCTS = 5       # 問題提到某個類別時，附上這個類別銷量前幾名
 _CODE = re.compile(r"[A-Za-z]\d{4}")
+# 問題用「這個商品」「這件」「那款」「它」這類說法指側欄選的商品。2026-10-28 實例：側欄商品不管問什麼都附上時，
+# 問「本期最該先處理的是什麼？」Qwen 1.5B 會把側欄的商品當成答案（資料表把它標成「問題提到的商品」）
+_SELECTED = re.compile(r"(這|那|此|該|本)(個|項|件|款)?(商品|產品)|(這|那)(件|款|支|瓶|罐|組|條|雙|套|頂|包|盒|台|把|顆)"
+                       r"|(這|那)個(?!類|分類|月|期|週|周|禮拜|星期|店|賣場)|選的商品|側欄")
+_PRONOUN = re.compile(r"(?<!其)[它他]")        # 「他」是常見的錯字
+# 「它」前面已經有別的對象（「哪個類別賣最好？它…」），指的就是那個，不是側欄的商品
+_ANTECEDENT = re.compile(r"哪|什麼|甚麼|類|店|賣場")
 
 
 def load_qa_prompt() -> str:
@@ -59,6 +67,14 @@ def mentioned_products(products, question: str) -> list[str]:
         if pos:
             hits.append((min(pos), r["product_id"]))
     return [pid for _, pid in sorted(hits)][:MAX_PRODUCTS]
+
+
+def refers_to_selected(question: str, names_other: bool = False) -> bool:
+    """names_other：問題已經提到別的商品，這時「它」指那個商品。"""
+    if _SELECTED.search(question):
+        return True
+    m = _PRONOUN.search(question)
+    return bool(m) and not names_other and not _ANTECEDENT.search(question[:m.start()])
 
 
 def mentioned_categories(products, question: str) -> list[str]:
@@ -128,7 +144,7 @@ def build_qa_context(analysis, question: str, product_id: str | None = None) -> 
             label, g = f"{c}類的商品（依價格由高到低）", g.sort_values("price", ascending=False)
         ctx[label] = [_product_row(r, perf_ok) for _, r in g.head(CATEGORY_PRODUCTS).iterrows()]
     ids = mentioned_products(products, question)
-    if product_id and product_id not in ids:
+    if product_id and product_id not in ids and refers_to_selected(question, names_other=bool(ids)):
         ids.append(product_id)
     details = []
     for pid in ids:

@@ -1,5 +1,7 @@
 # ShopPilot
 
+[![tests](https://github.com/kayla162/ShopPilot-demo/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kayla162/ShopPilot-demo/actions/workflows/tests.yml)
+
 把蝦皮賣家中心的報表變成商品層級的競品分析與優化建議；數字全部由程式計算，本機 AI 模型只負責把結果寫成白話。
 
 - **線上 demo（Streamlit Community Cloud）：** https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/
@@ -15,7 +17,7 @@
 
 ## English summary
 
-ShopPilot turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations, served as a Streamlit dashboard. Every number is computed deterministically (pandas, SQL, statistical tests); an optional LLM layer only rewrites those results in plain language. The LLM runs locally by default via Hugging Face `transformers` (Qwen 2.5 1.5B), behind a provider interface that can switch to OpenAI. A numeric-grounding guard blocks any reply containing numbers absent from the input, and an auto-generated, auto-graded Q&A benchmark scores 92% / 88% on two real shops. Data side: idempotent hash-based ingestion, per-shop SQLite isolation, period-aware analysis, and 519 automated tests in this public repo. The free online demo (Streamlit Community Cloud) cannot run the model, so it serves answers precomputed by the same local model through a cache-only provider whose cache keys match; live inference runs locally or in Docker. All data in this repo and in the online demo is synthetic (a fictional clothing shop generated with a fixed random seed); the real shops' reports are not published.
+ShopPilot turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations, served as a Streamlit dashboard. Every number is computed deterministically (pandas, SQL, statistical tests); an optional LLM layer only rewrites those results in plain language. The LLM runs locally by default via Hugging Face `transformers` (Qwen 2.5 1.5B), behind a provider interface that can switch to OpenAI. A numeric-grounding guard blocks any reply containing numbers absent from the input, and an auto-generated, auto-graded Q&A benchmark scores 92% / 88% on two real shops. Data side: idempotent hash-based ingestion, per-shop SQLite isolation, period-aware analysis, and 554 automated tests in this public repo. The free online demo (Streamlit Community Cloud) cannot run the model, so it serves answers precomputed by the same local model through a cache-only provider whose cache keys match; live inference runs locally or in Docker. All data in this repo and in the online demo is synthetic (a fictional clothing shop generated with a fixed random seed); the real shops' reports are not published.
 
 ## 技術重點
 
@@ -42,7 +44,7 @@ ShopPilot turns Shopee seller-center reports into product-level competitor analy
 - **Provider 介面：** 本機模型和 OpenAI 實作同一個介面，改 `config/llm.yaml` 一行就能切換；錯誤（沒裝套件、模型載入失敗、記憶體不足、API 錯誤）都轉成固定訊息，不外洩例外內容。
 - **數字防捏造檢查：** AI 回覆裡的每個數字都要在輸入資料裡找得到，否則整段不顯示。比對時考慮四捨五入、比例 ×100、百分比單位（把「多 N 件」寫成「高出 N%」會擋下，這是實測抓到的例子），並略過行首的條列編號。
 - **AI 問答：** 不把整個資料庫丟給模型，而是依問題挑資料：問題提到的商品、類別，加上全店摘要、各類別（已依銷量排序）、重點建議，組成約 5 千字的資料表。例如在示範賣場問「哪個類別賣最好？」，資料表只帶各類別的銷量排行和全店摘要。把欄位改成中文、清單先排序之後，實測從 5 題答出 1 題提升到 5 題。
-- **自動評估（`shoppilot/llm/qa_eval.py`）：** 題目和標準答案都由程式從同一份資料算出，換賣場、換期間都能重跑、自動評分。本機 Qwen 1.5B：服飾店 23/25（92%）、保養品店 22/25（88%）——這兩個數字是在兩家真實賣場測的，資料不公開；示範資料可以自己重跑。錯誤分析：錯的都是「把別的商品的數字套到這個商品」，數字都在資料裡，所以數字檢查擋不到，這點寫在 [docs/04_已知限制.md](docs/04_已知限制.md)。
+- **自動評估（`shoppilot/llm/qa_eval.py`）：** 題目和標準答案都由程式從同一份資料算出，換賣場、換期間都能重跑、自動評分。本機 Qwen 1.5B：服飾店 23/25（92%）、保養品店 22/25（88%）——這兩個數字是在兩家真實賣場測的，資料不公開；示範資料可以自己重跑。錯誤分析：錯的都是「把別的商品的數字套到這個商品」，數字都在資料裡，所以數字檢查擋不到，這點寫在 [docs/04_已知限制.md](docs/04_已知限制.md)。評估可以加 `--sidebar` 模擬 Dashboard（每題都帶側欄選的商品），這樣測出問全店的事時，小模型會答成側欄的商品；改成問到「這個商品」才帶側欄商品之後，3 份資料 72 題中「回答提到側欄商品、但它不是答案」從 6 題降到 1 題，不管側欄選什麼答對率都是 82%（修正前 81%–85%：側欄剛好是答案時比較高，所以預設的側欄商品少答對 2 題）。之後又補上「這個」「那個商品」「他」這些說法：在側欄選了商品後這樣問的 9 題從 2 題答對變成 7 題，用「它」指題目裡的商品時也不再答成側欄的商品。細節見已知限制第 11 項。
 - **模型比較（`shoppilot/llm/benchmark.py`）：** 同一批商品比較 Qwen 0.5B、1.5B、OpenAI 的數字捏造率、格式符合率、回應時間、成本和記憶體。
 
 ### 資料工程
@@ -82,7 +84,8 @@ ShopPilot turns Shopee seller-center reports into product-level competitor analy
 
 ### 測試
 
-- 這個公開版有 519 個自動化測試（`python -m pytest`）：單元測試、Dashboard 畫面測試（Streamlit `AppTest`），以及用示範資料跑完整流程的測試。
+- 這個公開版有 554 個自動化測試（`python -m pytest`）：單元測試、Dashboard 畫面測試（Streamlit `AppTest`），以及用示範資料跑完整流程的測試。
+- 每次 push 都由 GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu、Python 3.13 上只裝 `requirements.txt` 跑完整測試，結果見開頭的徽章。`requirements.txt` 是固定版本，和線上 demo 安裝的完全相同。
 - 私人版另外有一組**真實資料測試**：用每家店每個期間的真實報表（複製到暫存資料夾，不動真正的資料庫）檢查匯入、加總、每個商品的分析、建議依據、AI 資料表大小，並實際切到該期間檢查 Dashboard 各分頁。這些測試綁定真實資料，不放進公開版。
 - AI 相關的測試用假的模型，不需要下載模型也能跑。
 
@@ -145,3 +148,7 @@ docker run -p 7860:7860 shoppilot
 | 文件 | 內容 |
 |---|---|
 | [docs/04_已知限制.md](docs/04_已知限制.md) | 資料、分析、競品、AI、系統的已知限制，目前的處理與改善方向 |
+
+## 授權
+
+程式碼以 [MIT License](LICENSE) 授權。

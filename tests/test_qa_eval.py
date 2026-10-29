@@ -7,6 +7,7 @@ from shoppilot import db
 from shoppilot.analytics import report
 from shoppilot.llm import qa_eval as ev
 from shoppilot.llm.base import LLMError, LLMReply
+from shoppilot.llm.explainer import Explanation
 
 from test_competitor_trend import _seed
 
@@ -32,6 +33,45 @@ def test_generate_questions(analysis):
     assert next(q for q in qs if q.kind == "product_count").number == 2
     price = next(q for q in qs if q.kind == "price")
     assert (price.question, price.number) == ("A9991 的價格是多少？", 599.0) and price.product_id
+
+
+def test_todo_first_needs_the_product(analysis):
+    # 「全部規格缺貨」這類問題名稱，前幾條建議常常一樣（2026-10-28 示範資料前 5 條有 4 條）：
+    # 2026-10-28 實例：AI 把側欄的商品說成「全部規格缺貨」，只比對問題名稱會算成答對
+    pid = analysis.products.set_index("code").loc["A9994", "product_id"]
+    analysis.shop["top_suggestions"] = [{"product_id": pid, "product_label": "A9994", "title": "全部規格缺貨"}]
+    q = next(q for q in ev.generate_questions(analysis) if q.kind == "todo_first")
+    assert "全部規格缺貨" not in q.expected and "A9994" in q.expected
+    assert ev.grade(q, "ok", "最該先處理的是 A9991，它全部規格缺貨。") == "wrong"
+    assert ev.grade(q, "ok", "最該先處理的是 A9994 全部規格缺貨，要優先補貨。") == "correct"
+
+
+def test_questions_about_the_selected_product(analysis):
+    # 只有問「這個商品」時才會帶側欄的商品，評估要有這種題目；側欄選銷量第 1 以外的商品，
+    # 沒帶到側欄的商品時，AI 照抄銷量排行的第一列就答不對
+    ids = dict(zip(analysis.products["code"], analysis.products["product_id"]))
+    qs = [q for q in ev.generate_questions(analysis) if q.kind in ("selected", "antecedent")]
+    assert [(q.kind, q.question, q.product_id, q.in_sidebar) for q in qs] == [
+        ("selected", "這個商品的價格是多少？", ids["A9994"], True),
+        ("selected", "這件本期賣了幾件？", ids["A9994"], True),
+        ("selected", "它屬於哪個類別？", ids["A9994"], True),
+        ("antecedent", "全店銷量最高的商品是哪個？它的價格是多少？", ids["A9994"], True)]
+    assert [q.number for q in qs] == [399.0, 1.0, None, 599.0]          # 最後一題問的是銷量第 1 的 A9991
+    assert qs[2].expected == [analysis.products.set_index("code").loc["A9994", "category"]]
+
+
+def test_run_eval_keeps_the_question_sidebar_product(analysis, monkeypatch):
+    # 「這個商品…」是在側欄選了題目的商品之後問的，--sidebar 也不能換掉
+    seen = []
+    monkeypatch.setattr(ev, "answer_question", lambda an, q, pid, *a: seen.append(pid) or Explanation("ok", text="1"))
+    qs = [ev.Question("selected", "這件本期賣了幾件？", number=1.0, product_id="p-a9994", in_sidebar=True)]
+    ev.run_eval(analysis, qs, None, {}, sidebar="p-a9991")
+    assert seen == ["p-a9994"]
+
+
+def test_todo_first_for_the_whole_shop_uses_the_title(analysis):
+    q = next(q for q in ev.generate_questions(analysis) if q.kind == "todo_first")
+    assert q.expected == [analysis.shop["top_suggestions"][0]["title"]]          # 全店的建議沒有商品，答出問題就算對
 
 
 def test_generate_questions_needs_perf(analysis, kw, rules):
@@ -106,6 +146,28 @@ def test_run_eval_and_outputs(analysis, tmp_path):
         rows = list(csv.DictReader(f))
     assert [r["verdict"] for r in rows] == ["correct", "correct", "no_answer", "blocked", "error"]
     assert rows[1]["expected"] == "599"
+
+
+def test_run_eval_with_sidebar_product(analysis, monkeypatch):
+    # Dashboard 和線上 demo 每題都會帶側欄選的商品；評估可以模擬這個情況
+    seen = []
+    monkeypatch.setattr(ev, "answer_question", lambda an, q, pid, *a: seen.append(pid) or Explanation("ok", text="A9991"))
+    qs = [ev.Question("shop_top", "全店銷量最高的商品是哪個？", ["A9991"]),
+          ev.Question("price", "A9994 的價格是多少？", number=399.0, product_id="p-a9994")]
+    ev.run_eval(analysis, qs, None, {})
+    ev.run_eval(analysis, qs, None, {}, sidebar="p-a9991")
+    assert seen == [None, "p-a9994", "p-a9991", "p-a9991"]
+
+
+def test_sidebar_product_is_dashboard_default(analysis):
+    pid = ev.sidebar_product(analysis)
+    assert analysis.products.set_index("product_id").loc[pid, "code"] == "A9991"     # 銷量最高，側欄預設選它
+
+
+def test_markdown_states_sidebar_condition():
+    s = ev.summarize([ev.Graded("shop_top", "誰？", "A9991", "ok", "correct", 1.0, "A9991")])
+    assert "- 側欄商品：不帶" in ev.to_markdown(s, "測試店", "m", "—")
+    assert "- 側欄商品：A9991 示範款（每題都帶）" in ev.to_markdown(s, "測試店", "m", "—", sidebar="A9991 示範款")
 
 
 def test_main_unknown_shop(tmp_path, monkeypatch, capsys):

@@ -76,6 +76,31 @@ def test_context_adds_mentioned_and_selected_products(analysis):
     assert _detail_codes(ctx) == ["A9994", "A9991"]                                              # 不重複
 
 
+@pytest.mark.parametrize("question", ["這個商品要怎麼改？", "這件賣得好嗎？", "它的價格有競爭力嗎？",
+                                      "此商品的點擊率高嗎？", "側欄選的商品為什麼要補貨？",
+                                      # 2026-10-29 檢查：這些常見說法原本都沒帶側欄的商品
+                                      "這個賣得好嗎？", "這個要怎麼改？", "那個商品的價格？", "那款的點擊率高嗎？",
+                                      "他的價格有競爭力嗎？", "這頂帽子要補貨嗎？", "這包賣幾件？"])
+def test_context_adds_selected_product_when_question_refers_to_it(analysis, question):
+    pid = analysis.products.set_index("code").loc["A9991", "product_id"]
+    assert _detail_codes(qa.build_qa_context(analysis, question, product_id=pid)) == ["A9991"]
+
+
+@pytest.mark.parametrize("question, codes", [
+    ("本期最該先處理的是什麼？", None), ("全店銷量最高的商品是哪個？", None), ("這家店有賣上衣嗎？", None),
+    ("其它商品的價格呢？", None), ("其他商品的價格呢？", None), ("A9994 的價格是多少？", ["A9994"]),
+    ("這個月賣最好的是哪個？", None),
+    # 「它」前面已經有別的對象，指的就是那個，不是側欄的商品
+    ("哪個類別賣最好？它的營收多少？", None), ("全店銷量最高的商品是哪個？它的價格是多少？", None),
+    ("A9994 賣得好嗎？它的價格呢？", ["A9994"]),
+])
+def test_context_leaves_out_selected_product_the_question_is_not_about(analysis, question, codes):
+    # 2026-10-28 實例：問「本期最該先處理的是什麼？」，Qwen 1.5B 回答成側欄選的商品（資料表裡它被標成「問題提到的商品」）
+    pid = analysis.products.set_index("code").loc["A9991", "product_id"]
+    ctx = qa.build_qa_context(analysis, question, product_id=pid)
+    assert (_detail_codes(ctx) if codes else ctx.get("問題提到的商品的完整分析")) == codes
+
+
 def test_context_adds_mentioned_category(analysis):
     cat = analysis.products.iloc[0]["category"]
     ctx = qa.build_qa_context(analysis, f"{cat}類哪個賣最好？")

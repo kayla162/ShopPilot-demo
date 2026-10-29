@@ -57,6 +57,36 @@ def test_all_sold_out_mentions_exposure_only_with_perf(rules):
         assert hit["evidence"] == expected
 
 
+def test_all_sold_out_absorbs_bestseller_specs(rules):
+    # 全部缺貨時只出一條：有需求的規格寫進「全部規格缺貨」，不再另出「暢銷規格缺貨」
+    skus = pd.DataFrame({"variation_name": ["黑色,M", "黑色,L", "白色,M", "灰色,S"], "stock": [0, 0, 0, 0],
+                         "units": [6, 0, 0, 0], "atc_units": [13, 0, 1, 3]})
+    sugg, _ = _run(_row(stockout_skus=4, stockout_ratio=1.0), rules, sku_rows=skus)
+    assert [s["code"] for s in sugg] == ["ALL_SOLD_OUT"]
+    assert sugg[0]["evidence"] == ("4 個規格全部庫存 0，其中 2 個有需求（黑色,M：賣出 6 件、加購 13 件；"
+                                   "灰色,S：賣出 0 件、加購 3 件）；本期曝光 1,000")
+    assert sugg[0]["action"] == "優先補貨：黑色,M、灰色,S，或下架整理"
+    one = pd.DataFrame({"variation_name": ["黑色,S"], "stock": [0], "units": [1], "atc_units": [66]})
+    sugg, _ = _run(_row(sku_count=1, stockout_skus=1, stockout_ratio=1.0), rules, sku_rows=one)
+    assert [s["evidence"] for s in sugg] == ["1 個規格全部庫存 0（黑色,S：賣出 1 件、加購 66 件）；本期曝光 1,000"]
+
+
+def test_partly_sold_out_keeps_bestseller_and_variation_rules(rules):
+    skus = pd.DataFrame({"variation_name": ["黑色,M", "黑色,L", "白色,M", "灰色,S"], "stock": [0, 0, 3, 2],
+                         "units": [6, 0, 5, 0], "atc_units": [13, 0, 10, 0]})
+    codes = _codes(_row(stockout_skus=2, stockout_ratio=0.5), rules, sku_rows=skus)
+    assert codes == ["BESTSELLER_OUT_OF_STOCK", "SOLD_OUT_VARIATIONS"]
+
+
+def test_click_no_order_action_ignores_bestseller_specs(rules):
+    # 暢銷規格缺貨的規格明細不能混進「高點擊零成交」的建議動作
+    skus = pd.DataFrame({"variation_name": ["黑色,M", "白色,M"], "stock": [0, 5], "units": [0, 0], "atc_units": [4, 0]})
+    sugg, _ = _run(_row(orders=0, units=0, clicks=400), rules, sku_rows=skus)
+    assert "BESTSELLER_OUT_OF_STOCK" in [s["code"] for s in sugg]
+    hit = next(s for s in sugg if s["code"] == "CLICK_NO_ORDER")
+    assert hit["action"] == "檢查價格、尺寸資訊、首圖和詳情頁是否一致"
+
+
 def test_click_no_order_needs_enough_sample(rules):
     sugg, _ = _run(_row(orders=0, units=0, clicks=400), rules)
     hit = next(s for s in sugg if s["code"] == "CLICK_NO_ORDER")

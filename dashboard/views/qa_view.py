@@ -38,7 +38,7 @@ def _show(msg: dict) -> None:
 
 def render(ctx: common.Ctx) -> None:
     st.caption("用白話問賣場的數據。AI 只看程式算好的資料（全店摘要、各類別、重點建議、銷量前幾名，"
-               "以及問題裡提到的商品和側欄選的商品），資料裡沒有的數字會被擋下不顯示。送出問題才會呼叫 AI。")
+               "以及問題裡提到的商品；問「這個商品」時會帶側欄選的商品），資料裡沒有的數字會被擋下不顯示。送出問題才會呼叫 AI。")
     st.caption(EXAMPLES)
     key = f"qa_history::{ctx.db_path}"      # 每個賣場各自的對話紀錄
     history = st.session_state.setdefault(key, [])

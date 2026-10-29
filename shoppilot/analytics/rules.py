@@ -67,25 +67,32 @@ def product_suggestions(row: pd.Series, sku_rows: pd.DataFrame | None, same_cat:
 
     # ---- 缺貨（需要價格與庫存 P）----
     if bool(row["has_price"]):
+        hit = pd.DataFrame()
         if sku_rows is not None and not sku_rows.empty:
             units = sku_rows["units"].map(_num)
             atc = sku_rows["atc_units"].map(_num)
             stock = pd.to_numeric(sku_rows["stock"], errors="coerce")
             hit = sku_rows[(stock == 0) & ((units >= c["bestseller_min_units"]) | (atc >= c["bestseller_min_atc"]))]
-            if not hit.empty:
-                detail = "；".join(f"{h['variation_name']}：賣出 {int(_num(h['units']))} 件、加購 {int(_num(h['atc_units']))} 件"
-                                  for _, h in hit.iterrows())
-                add("BESTSELLER_OUT_OF_STOCK", "高", "暢銷規格缺貨",
-                    f"{len(hit)} 個有需求的規格目前庫存 0（{detail}）", "優先補貨：" + "、".join(hit["variation_name"]))
+        hit_detail = "；".join(f"{h['variation_name']}：賣出 {int(_num(h['units']))} 件、加購 {int(_num(h['atc_units']))} 件"
+                               for _, h in hit.iterrows())
+        restock = "優先補貨：" + "、".join(hit["variation_name"]) if not hit.empty else ""
         sku_count, sold_out = int(_num(row["sku_count"])), int(_num(row["stockout_skus"]))
         if sku_count and sold_out == sku_count:
+            # 全部缺貨時，有需求的規格寫在這一條裡，不另出「暢銷規格缺貨」
+            demand = ("" if hit.empty else f"（{hit_detail}）" if len(hit) == sku_count
+                      else f"，其中 {len(hit)} 個有需求（{hit_detail}）")
             # 缺「商品表現」報表時，曝光是補 0 的，不寫進依據
             add("ALL_SOLD_OUT", "高", "全部規格缺貨",
-                f"{sku_count} 個規格全部庫存 0" + (f"；本期曝光 {impressions:,}" if perf_ok else ""), "補貨，或下架整理")
-        elif sku_count and sold_out / sku_count >= c["sold_out_ratio"] and impressions >= c["sold_out_min_impressions"]:
-            add("SOLD_OUT_VARIATIONS", "中", "缺貨規格過半",
-                f"缺貨 {sold_out}/{sku_count} 個規格（{sold_out / sku_count:.0%}）；本期曝光 {impressions:,}",
-                "補貨或整理規格")
+                f"{sku_count} 個規格全部庫存 0{demand}" + (f"；本期曝光 {impressions:,}" if perf_ok else ""),
+                f"{restock}，或下架整理" if restock else "補貨，或下架整理")
+        else:
+            if not hit.empty:
+                add("BESTSELLER_OUT_OF_STOCK", "高", "暢銷規格缺貨",
+                    f"{len(hit)} 個有需求的規格目前庫存 0（{hit_detail}）", restock)
+            if sku_count and sold_out / sku_count >= c["sold_out_ratio"] and impressions >= c["sold_out_min_impressions"]:
+                add("SOLD_OUT_VARIATIONS", "中", "缺貨規格過半",
+                    f"缺貨 {sold_out}/{sku_count} 個規格（{sold_out / sku_count:.0%}）；本期曝光 {impressions:,}",
+                    "補貨或整理規格")
 
     # ---- 流量與轉換（需要商品表現 B′）----
     if perf_ok:

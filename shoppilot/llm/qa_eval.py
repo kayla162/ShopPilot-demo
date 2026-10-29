@@ -3,6 +3,7 @@
 用法（在專案根目錄）：
     python -m shoppilot.llm.qa_eval                     # 預設賣場、config/llm.yaml 的模型
     python -m shoppilot.llm.qa_eval --shop 保養品店 --limit 10
+    python -m shoppilot.llm.qa_eval --sidebar           # 每題都帶側欄預設選中的商品（和 Dashboard、線上 demo 一樣）
 
 每一題的結果分成：
     correct   答對：回答裡有標準答案（貨號、商品名稱、類別、數字）
@@ -25,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from shoppilot.analytics.products import selection_order
 from shoppilot.llm.qa import answer_question
 
 UNKNOWN_PHRASES = ("目前的資料沒有", "資料沒有", "沒有這項資訊", "沒有相關")
@@ -35,7 +37,10 @@ _BRAND = re.compile(r"【([^】]+)】")
 KIND_LABELS = {"category_top": "賣最好的類別", "shop_top": "銷量最高的商品", "product_count": "商品數",
                "todo_first": "最該先處理的事", "category_best": "某類別賣最好的商品", "price": "商品價格",
                "category_of": "商品類別", "units": "商品銷量", "has_category": "有沒有賣某類",
-               "absent": "資料沒有的事"}
+               "absent": "資料沒有的事", "selected": "問側欄選的商品", "antecedent": "「它」指題目裡的商品"}
+# 問側欄選的商品：每個商品一組說法（2026-10-29 補上的說法放第二組）
+SELECTED_PHRASES = [("這個商品的價格是多少？", "這件本期賣了幾件？", "它屬於哪個類別？"),
+                    ("這個的價格是多少？", "那個商品本期賣了幾件？", "他屬於哪個類別？")]
 
 
 @dataclass
@@ -46,6 +51,7 @@ class Question:
     number: float | None = None                          # 數字題：回答裡要有這個數（允許 309.0 這種寫法）
     expect_unknown: bool = False                         # 資料沒有的事：要回答沒有
     product_id: str | None = None
+    in_sidebar: bool = False                             # 在側欄選了 product_id 之後問的（「這個商品…」）
 
 
 @dataclass
@@ -102,10 +108,10 @@ def generate_questions(analysis, per_kind: int = 5) -> list[Question]:
     todo = analysis.shop.get("top_suggestions") or []
     if todo:
         first = todo[0]
-        tokens = [first["title"]]
         match = reg[reg["product_id"] == first.get("product_id")]
-        if not match.empty:
-            tokens += _name_tokens(match.iloc[0])
+        # 有商品的建議要答出商品：「全部規格缺貨」這類問題名稱前幾條常常一樣，只寫問題名稱可能是在說別的商品
+        # （2026-10-28 實例：AI 把側欄的商品說成「全部規格缺貨」）
+        tokens = _name_tokens(match.iloc[0]) if not match.empty else [first["title"]]
         qs.append(Question("todo_first", "本期最該先處理的是什麼？", tokens))
     for cat in [c for c in cat_units.index if cat_units[c] > 0][:3]:
         best = by_units[by_units["category"] == cat].iloc[0]
@@ -115,6 +121,16 @@ def generate_questions(analysis, per_kind: int = 5) -> list[Question]:
         qs.append(Question("price", f"{label} 的價格是多少？", number=float(r["price"]), product_id=r["product_id"]))
         qs.append(Question("category_of", f"{label} 屬於哪個類別？", [r["category"]], product_id=r["product_id"]))
         qs.append(Question("units", f"{label} 本期賣了幾件？", number=float(r["units"]), product_id=r["product_id"]))
+    # 側欄選銷量第 1 以外的商品：沒帶到側欄的商品時，照抄銷量排行的第一列就答不對
+    others = by_units.iloc[1:1 + len(SELECTED_PHRASES)]
+    for (price, units, category), (_, r) in zip(SELECTED_PHRASES, others.iterrows()):
+        pid = r["product_id"]
+        qs += [Question("selected", price, number=float(r["price"]), product_id=pid, in_sidebar=True),
+               Question("selected", units, number=float(r["units"]), product_id=pid, in_sidebar=True),
+               Question("selected", category, [r["category"]], product_id=pid, in_sidebar=True)]
+    if not others.empty:
+        qs.append(Question("antecedent", "全店銷量最高的商品是哪個？它的價格是多少？", number=float(top["price"]),
+                           product_id=others.iloc[0]["product_id"], in_sidebar=True))
     for cat in list(cat_units.index[:2]):
         qs.append(Question("has_category", f"這家店有賣{cat}嗎？", [cat]))
     qs.append(Question("absent", f"這家店有賣{ABSENT_ITEM}嗎？", expect_unknown=True))
@@ -148,12 +164,21 @@ class _NoCache:
         pass
 
 
+def sidebar_product(analysis) -> str | None:
+    """Dashboard 側欄預設選中的商品（選單的第一個）。"""
+    ids = selection_order(analysis.products)
+    return ids[0] if ids else None
+
+
 def run_eval(analysis, questions: list[Question], provider, cfg: dict, clock=time.perf_counter,
-             progress=None) -> list[Graded]:
+             progress=None, sidebar: str | None = None) -> list[Graded]:
+    """sidebar：每題都帶這個側欄商品（Dashboard 送出問題時一定會帶側欄選的商品）；None 時只帶題目本身的商品。
+    在側欄選了商品之後問的題目（in_sidebar）一律帶題目的商品。"""
     out = []
     for i, q in enumerate(questions, 1):
         start = clock()
-        res = answer_question(analysis, q.question, q.product_id, provider, _NoCache(), cfg)
+        pid = q.product_id if q.in_sidebar else sidebar or q.product_id
+        res = answer_question(analysis, q.question, pid, provider, _NoCache(), cfg)
         seconds = round(clock() - start, 1)
         text = res.text or res.message
         expected = (f"{q.number:g}" if q.number is not None else "沒有／資料沒有" if q.expect_unknown
@@ -178,11 +203,12 @@ def summarize(results: list[Graded]) -> dict:
             "avg_seconds": sum(times) / len(times) if times else None, "by_kind": kinds}
 
 
-def to_markdown(s: dict, shop: str, model: str, period: str) -> str:
+def to_markdown(s: dict, shop: str, model: str, period: str, sidebar: str | None = None) -> str:
     pct = lambda n: f"{n / s['total']:.0%}" if s["total"] else "—"  # noqa: E731
     lines = [
         f"# AI 問答評估：{shop}（{datetime.now():%Y-%m-%d %H:%M}）", "",
-        f"- 模型：{model}", f"- 資料期間：{period}", f"- 題數：{s['total']}，平均每題 {s['avg_seconds'] or 0:.0f} 秒", "",
+        f"- 模型：{model}", f"- 資料期間：{period}", f"- 側欄商品：{f'{sidebar}（每題都帶）' if sidebar else '不帶'}",
+        f"- 題數：{s['total']}，平均每題 {s['avg_seconds'] or 0:.0f} 秒", "",
         "| 結果 | 題數 | 比例 |", "|---|---|---|",
         f"| 答對 | {s['correct']} | {pct(s['correct'])} |",
         f"| 答錯 | {s['wrong']} | {pct(s['wrong'])} |",
@@ -215,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shop", default=shops.DEFAULT_SHOP, help="用哪個賣場的資料（預設：預設賣場）")
     parser.add_argument("--limit", type=int, default=None, help="只跑前幾題（試跑用）")
     parser.add_argument("--per-kind", type=int, default=5, help="價格、類別、銷量題各出幾個商品（預設 5）")
+    parser.add_argument("--sidebar", action="store_true", help="每題都帶側欄預設選中的商品（和 Dashboard、線上 demo 一樣）")
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -241,11 +268,13 @@ def main(argv: list[str] | None = None) -> int:
     provider = make_provider(cfg)
     if hasattr(provider, "load"):
         provider.load()
-    print(f"{args.shop}：{len(questions)} 題，模型 {provider.model}")
-    results = run_eval(analysis, questions, provider, cfg,
+    sidebar = sidebar_product(analysis) if args.sidebar else None
+    label = _label(analysis.products.set_index("product_id").loc[sidebar]) if sidebar else None
+    print(f"{args.shop}：{len(questions)} 題，模型 {provider.model}" + (f"，側欄商品 {label}" if label else ""))
+    results = run_eval(analysis, questions, provider, cfg, sidebar=sidebar,
                        progress=lambda i, n, r: print(f"  {i}/{n} {r.verdict:9s} {r.seconds}s  {r.question}", flush=True))
     p = analysis.ds.period
-    md = to_markdown(summarize(results), args.shop, provider.model, f"{p[0]} ～ {p[1]}" if p else "—")
+    md = to_markdown(summarize(results), args.shop, provider.model, f"{p[0]} ～ {p[1]}" if p else "—", label)
     out_dir = shops.shop_dir(args.shop) / "qa_eval" / f"{datetime.now():%Y%m%d-%H%M%S}"
     write_outputs(out_dir, results, md)
     print()

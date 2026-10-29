@@ -2,6 +2,7 @@
 
 全部走正式路徑（explain_product、answer_question），經過同樣的數字檢查，不是寫死的假答案。
 範例問題只收評分為「答對」的題目；同一種題型的題目都沒答對，就跳過這種題型。
+答錯的答案也不寫進快取：線上 demo 只讀快取，留著的話訪客打同一題會拿到錯的答案。
 """
 from __future__ import annotations
 
@@ -26,6 +27,24 @@ class PrewarmResult:
     failed_products: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     skipped_kinds: list[str] = field(default_factory=list)
+
+
+class _HoldUntilGraded:
+    """範例問題用的快取：讀正式快取，寫入先暫存，評分答對才寫進正式快取。"""
+
+    def __init__(self, cache) -> None:
+        self.cache, self.pending = cache, []
+
+    def get(self, input_hash: str) -> dict | None:
+        return self.cache.get(input_hash)
+
+    def put(self, row: dict) -> None:
+        self.pending.append(row)
+
+    def settle(self, keep: bool) -> None:
+        for row in self.pending if keep else []:
+            self.cache.put(row)
+        self.pending = []
 
 
 def _usable(analysis, pid: str) -> bool:
@@ -70,12 +89,14 @@ def prewarm(analysis, provider, cache, cfg: dict, log=print) -> PrewarmResult:
     by_kind: dict[str, list] = {}
     for q in generate_questions(analysis):
         by_kind.setdefault(q.kind, []).append(q)
+    held = _HoldUntilGraded(cache)
     for kind in EXAMPLE_KINDS:
         chosen = None
         for q in by_kind.get(kind, []):
-            # 畫面上點範例問題時固定帶預設商品（側欄選的商品會放進問答的資料表），快取才對得上
-            r = answer_question(analysis, q.question, result.product_id, provider, cache, cfg)
+            # 畫面上點範例問題時固定帶預設商品（問到「這個商品」時側欄選的商品會放進問答的資料表），快取才對得上
+            r = answer_question(analysis, q.question, result.product_id, provider, held, cfg)
             verdict = grade(q, r.status, r.text)
+            held.settle(keep=verdict == "correct")
             log(f"範例問題（{kind}）{q.question}：{r.status}／{verdict}")
             if verdict == "correct":
                 chosen = q.question
