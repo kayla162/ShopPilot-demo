@@ -17,7 +17,7 @@ from shoppilot.llm.explainer import (
 )
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa.md"
-QA_VERSION = "qa5"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
+QA_VERSION = "qa6"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
 MAX_QUESTION_LEN = 200
 TOP_SELLERS = 10
 MAX_PRODUCTS = 3            # 問題裡提到的商品最多附幾個完整分析（問到「這個商品」時再加上側欄選的商品）
@@ -153,6 +153,10 @@ def build_qa_context(analysis, question: str, product_id: str | None = None) -> 
         ctx["本期最該先處理的事（依優先順序）"] = [
             {"商品": s.get("product_label") or "全店", "優先度": s.get("priority"), "問題": s.get("title"),
              "依據": s.get("evidence"), "建議做法": s.get("action")} for s in todo]
+        # 2026-10-30 開發集實例：只有清單時，問「本期最該先處理的是什麼？」常答成銷量第 1 的商品，或把清單整段照抄、
+        # 寫到輸出上限被截斷（6 個賣場 18 題合格 1 題）；清單後面直接寫出第一條，原本的問法 6 個賣場都合格
+        first = ctx["本期最該先處理的事（依優先順序）"][0]
+        ctx["最該先處理的事"] = f"{first['商品']}：{first['問題']}，{first['建議做法']}"
     if perf_ok and not regular.empty:
         ranking = _ranking(regular.sort_values(["units", "impressions"], ascending=False).head(TOP_SELLERS))
         # 全店摘要已經寫了就不再寫：同一個商品出現太多次，問「本期最該先處理的是什麼？」常答成它

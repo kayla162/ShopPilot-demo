@@ -92,6 +92,18 @@ def test_no_best_seller_without_sales(analysis, kw, rules):
     assert ctx["全店銷量排行"]["銷量最高的商品"] == ctx[f"{cat}類銷量排行"]["銷量最高的商品"] == "沒有（本期銷量都是 0）"
 
 
+def test_todo_list_is_followed_by_the_first_thing_to_do(analysis):
+    # 2026-10-30 開發集實例：只有清單時，問「本期最該先處理的是什麼？」常答成銷量第 1 的商品，或把清單整段照抄寫到
+    # 輸出上限；清單後面直接寫出第一條，6 個賣場都答對、回答也短
+    analysis.shop["top_suggestions"] = [
+        {"product_label": "A9994", "priority": "高", "title": "全部規格缺貨", "evidence": "…", "action": "優先補貨：白"},
+        {"product_label": None, "priority": "中", "title": "描述只有規格", "evidence": "…", "action": "補上賣點"}]
+    ctx = qa.build_qa_context(analysis, "本期最該先處理的是什麼？")
+    keys = list(ctx)
+    assert keys[keys.index("本期最該先處理的事（依優先順序）") + 1] == "最該先處理的事"
+    assert ctx["最該先處理的事"] == "A9994：全部規格缺貨，優先補貨：白"
+
+
 def test_zero_sales_product_says_it_sold_nothing(analysis, kw, rules):
     # 2026-10-30 開發集實例：銷量 0 的商品（資料表裡是 sales_units: 0.0），問「本期賣了幾件？」
     # Qwen 1.5B 會回答資料沒有，或編出別的商品的銷量
