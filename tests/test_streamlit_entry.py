@@ -1,5 +1,6 @@
 """公開版的 Streamlit Community Cloud 進入點：展示模式＋只讀快取的 AI，示範資料庫用暫存的複本。"""
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,3 +54,29 @@ def test_entry_copies_demo_data_again_after_it_changes(monkeypatch):
     finally:
         os.utime(examples, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert second != first and (Path(second) / "examples.json").read_bytes() == examples.read_bytes()
+
+
+def _own_modules():
+    return {k: v for k, v in sys.modules.items() if k.split(".")[0] in ("shoppilot", "dashboard")}
+
+
+@pytest.mark.skipif(not DEMO_DB.exists(), reason="沒有 demo/shoppilot.db（先執行 python scripts/build_demo.py）")
+def test_entry_reloads_code_when_demo_data_changes(monkeypatch):
+    # 2026-10-30 實例：拉了新的 commit 之後只換了示範資料，程序裡還是舊的問答程式（qa5），算出來的快取鍵
+    # 對不上新的快取（qa6），每一題範例都顯示「AI 文字分析目前無法使用」
+    examples = ROOT / "demo" / "examples.json"
+    st = examples.stat()
+    saved = _own_modules()
+    try:
+        _data_dir_after_run(monkeypatch)
+        old = sys.modules["shoppilot.llm.qa"]
+        _data_dir_after_run(monkeypatch)
+        assert sys.modules["shoppilot.llm.qa"] is old                      # 資料沒變：不重新載入
+        os.utime(examples, ns=(st.st_atime_ns, st.st_mtime_ns + 2 * 10**9))  # 模擬拉了新的 commit
+        _data_dir_after_run(monkeypatch)
+        assert sys.modules["shoppilot.llm.qa"] is not old
+    finally:
+        os.utime(examples, ns=(st.st_atime_ns, st.st_mtime_ns))
+        for k in _own_modules():
+            del sys.modules[k]
+        sys.modules.update(saved)                                         # 其他測試拿到的還是原本的模組
