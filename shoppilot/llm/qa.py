@@ -2,7 +2,7 @@
 
 小模型讀不了整個資料庫，所以每個問題只送一份精簡的「資料表」（約 2–4 千字）：
 全店摘要、各類別、本期重點建議、銷量前幾名，以及問題裡提到的商品（貨號、商品名稱、類別）；
-問題問到「這個商品」時再加上側欄選的商品。
+問題問到「這個商品」時再加上側欄選的商品（放在自己的標題底下）。
 回覆一樣要通過數字檢查：資料和問題裡都沒有的數字就擋下，不顯示。
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from shoppilot.llm.explainer import (
 )
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa.md"
-QA_VERSION = "qa3"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
+QA_VERSION = "qa5"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
 MAX_QUESTION_LEN = 200
 TOP_SELLERS = 10
 MAX_PRODUCTS = 3            # 問題裡提到的商品最多附幾個完整分析（問到「這個商品」時再加上側欄選的商品）
@@ -30,6 +30,9 @@ _SELECTED = re.compile(r"(這|那|此|該|本)(個|項|件|款)?(商品|產品)|
 _PRONOUN = re.compile(r"(?<!其)[它他]")        # 「他」是常見的錯字
 # 「它」前面已經有別的對象（「哪個類別賣最好？它…」），指的就是那個，不是側欄的商品
 _ANTECEDENT = re.compile(r"哪|什麼|甚麼|類|店|賣場")
+# 側欄的商品和問題直接提到的商品分開放：2026-10-29 評估，放在同一個標題底下時，問「這件本期賣了幾件？」
+# Qwen 1.5B 回答成「本期最該先處理的事」第一條的商品
+SELECTED_LABEL = "使用者在側欄選的商品（問題裡的「這個」「這件」「它」指的就是這個商品）"
 
 
 def load_qa_prompt() -> str:
@@ -50,6 +53,16 @@ def _product_row(r, perf_ok: bool) -> dict:
     if perf_ok:     # 沒有「商品表現」報表時銷量、曝光是補 0 的，不能給 AI 當成事實
         row.update({"期間銷量": _r(r["units"], 0), "曝光": _r(r["impressions"], 0), "點擊率": _r(r["ctr"], 4)})
     return row
+
+
+def _ranking(top) -> dict:
+    """銷量排行（已排好序、有銷量資料的商品）。清單後面直接寫出銷量最高的商品：2026-10-29 用開發集
+    （另外 3 個 seed 的示範資料＋服飾店）實測，只有清單時 Qwen 1.5B 常把清單後段（離問題最近）的商品
+    當成第一名，「某類別賣最好的商品」13 題答對 6 題；加上這一欄答對 12 題。
+    沒有賣出時不寫「本期沒有商品賣出」：「這家店有賣上衣嗎？」會被當成問賣出，答成資料沒有。"""
+    rows = [_product_row(r, True) for _, r in top.iterrows()]
+    best = f"{rows[0]['商品']}（{rows[0]['期間銷量']:.0f} 件）" if rows[0]["期間銷量"] else "沒有（本期銷量都是 0）"
+    return {f"前 {len(rows)} 名（由高到低）": rows, "銷量最高的商品": best}
 
 
 def mentioned_products(products, question: str) -> list[str]:
@@ -82,6 +95,21 @@ def mentioned_categories(products, question: str) -> list[str]:
     return sorted(cats, key=question.find)
 
 
+def _category_rows(cats: list[dict], regular, perf_ok: bool) -> list[dict]:
+    """各類別一列；有銷量時依期間總銷量由高到低，沒有時依商品數由多到少。"""
+    units = regular.groupby("category")["units"].sum() if perf_ok and not regular.empty else {}
+    rows = []
+    for c in cats:
+        row = {"類別": c["category"], "商品數": c["products"], "平均價格": _r(c["avg_price"]),
+               "最低價": c["min"], "最高價": c["max"]}
+        if perf_ok:
+            row.update({"期間總銷量": _r(units.get(c["category"], 0), 0), "有賣出的商品數": c["with_sales"]})
+        rows.append(row)
+    if perf_ok:
+        return sorted(rows, key=lambda x: -(x["期間總銷量"] or 0))
+    return sorted(rows, key=lambda x: -x["商品數"])
+
+
 def build_qa_context(analysis, question: str, product_id: str | None = None) -> dict:
     """給 AI 的資料表。只放程式算好的結果，不放原始報表。
 
@@ -101,6 +129,7 @@ def build_qa_context(analysis, question: str, product_id: str | None = None) -> 
                if (shop.get("data_status") or {}).get(key) != "ok"]
     if missing:
         ctx["缺少的報表"] = missing
+    cats = _category_rows(shop.get("category_price") or [], regular, perf_ok)
     if summary:
         overview = {"商品數": summary.get("products"), "平均價格": _r(summary.get("avg_price")),
                     "最低價": summary.get("price_min"), "最高價": summary.get("price_max")}
@@ -110,57 +139,59 @@ def build_qa_context(analysis, question: str, product_id: str | None = None) -> 
                              "全店點擊率": _r((shop.get("baselines") or {}).get("ctr_base"), 4)})
             if top.get("units"):
                 overview["銷量最高的商品"] = f"{top.get('code') or ''} {top.get('name')}（{top['units']:.0f} 件）".strip()
+            # 2026-10-29 開發集實例：只有清單時，問「哪個類別賣最好？」Qwen 1.5B 常答成銷量第 1 的商品屬於的類別
+            if cats and cats[0]["期間總銷量"]:
+                overview["銷量最高的類別"] = f"{cats[0]['類別']}（{cats[0]['期間總銷量']:.0f} 件）"
             unlisted = shop.get("unlisted_perf") or {}
             if unlisted.get("units"):
                 overview["已刪除商品的銷量（不列入分析）"] = _r(unlisted["units"], 0)
         ctx["全店摘要"] = overview
-    cats = shop.get("category_price") or []
     if cats:
-        units = regular.groupby("category")["units"].sum() if perf_ok and not regular.empty else {}
-        rows = []
-        for c in cats:
-            row = {"類別": c["category"], "商品數": c["products"], "平均價格": _r(c["avg_price"]),
-                   "最低價": c["min"], "最高價": c["max"]}
-            if perf_ok:
-                row.update({"期間總銷量": _r(units.get(c["category"], 0), 0), "有賣出的商品數": c["with_sales"]})
-            rows.append(row)
-        if perf_ok:
-            ctx["各類別（依期間總銷量由高到低）"] = sorted(rows, key=lambda x: -(x["期間總銷量"] or 0))
-        else:
-            ctx["各類別（依商品數由多到少）"] = sorted(rows, key=lambda x: -x["商品數"])
+        ctx["各類別（依期間總銷量由高到低）" if perf_ok else "各類別（依商品數由多到少）"] = cats
     todo = (shop.get("top_suggestions") or [])[:5]
     if todo:
         ctx["本期最該先處理的事（依優先順序）"] = [
             {"商品": s.get("product_label") or "全店", "優先度": s.get("priority"), "問題": s.get("title"),
              "依據": s.get("evidence"), "建議做法": s.get("action")} for s in todo]
     if perf_ok and not regular.empty:
-        top = regular.sort_values(["units", "impressions"], ascending=False).head(TOP_SELLERS)
-        ctx["全店銷量最高的商品（由高到低）"] = [_product_row(r, perf_ok) for _, r in top.iterrows()]
+        ranking = _ranking(regular.sort_values(["units", "impressions"], ascending=False).head(TOP_SELLERS))
+        # 全店摘要已經寫了就不再寫：同一個商品出現太多次，問「本期最該先處理的是什麼？」常答成它
+        if "銷量最高的商品" in ctx.get("全店摘要", {}):
+            del ranking["銷量最高的商品"]
+        ctx["全店銷量排行"] = ranking
     for c in (mentioned_categories(regular, question) if not regular.empty else []):
         g = regular[regular["category"] == c]
         if perf_ok:
-            label, g = f"{c}類銷量最高的商品（由高到低）", g.sort_values(["units", "impressions"], ascending=False)
+            ctx[f"{c}類銷量排行"] = _ranking(g.sort_values(["units", "impressions"], ascending=False).head(CATEGORY_PRODUCTS))
         else:
-            label, g = f"{c}類的商品（依價格由高到低）", g.sort_values("price", ascending=False)
-        ctx[label] = [_product_row(r, perf_ok) for _, r in g.head(CATEGORY_PRODUCTS).iterrows()]
+            g = g.sort_values("price", ascending=False).head(CATEGORY_PRODUCTS)
+            ctx[f"{c}類的商品（依價格由高到低）"] = [_product_row(r, perf_ok) for _, r in g.iterrows()]
     ids = mentioned_products(products, question)
-    if product_id and product_id not in ids and refers_to_selected(question, names_other=bool(ids)):
-        ids.append(product_id)
-    details = []
-    for pid in ids:
-        try:
-            pa = analysis.product(pid)
-        except KeyError:
-            continue
-        if pa["product"].get("is_special") or not pa.get("default_pool"):
-            details.append({"product": {k: pa["product"].get(k) for k in ("code", "name", "category", "price")},
-                            "suggestions": [{k: s.get(k) for k in ("priority", "title", "evidence", "action")}
-                                            for s in pa.get("suggestions", [])[:3]]})
-        else:
-            details.append(build_ai_input(pa, pa["default_pool"]))
+    details = [d for d in (_product_detail(analysis, pid) for pid in ids) if d]
     if details:
         ctx["問題提到的商品的完整分析"] = details
+    if product_id and product_id not in ids and refers_to_selected(question, names_other=bool(ids)):
+        selected = _product_detail(analysis, product_id)
+        if selected:
+            ctx[SELECTED_LABEL] = selected
     return ctx
+
+
+def _product_detail(analysis, pid: str) -> dict | None:
+    try:
+        pa = analysis.product(pid)
+    except KeyError:
+        return None
+    if pa["product"].get("is_special") or not pa.get("default_pool"):
+        return {"product": {k: pa["product"].get(k) for k in ("code", "name", "category", "price")},
+                "suggestions": [{k: s.get(k) for k in ("priority", "title", "evidence", "action")}
+                                for s in pa.get("suggestions", [])[:3]]}
+    detail = build_ai_input(pa, pa["default_pool"])
+    # 2026-10-30 開發集實例：只有 sales_units: 0.0 時，問「本期賣了幾件？」Qwen 1.5B 常回答資料沒有，
+    # 或編出別的商品的銷量（數字在資料表別處，數字檢查擋不到）；開頭寫明之後 30 題從 10 題答對變成 26 題
+    if detail["product"].get("sales_units") == 0:
+        return {"本期銷量": "0 件（本期沒有賣出）", **detail}
+    return detail
 
 
 def _answer(analysis, question: str, product_id, provider: LLMProvider | None, cache: AICache,
