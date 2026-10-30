@@ -17,7 +17,7 @@
 
 ## English summary
 
-ShopPilot turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations, served as a Streamlit dashboard. Every number is computed deterministically (pandas, SQL, statistical tests); an optional LLM layer only rewrites those results in plain language. The LLM runs locally by default via Hugging Face `transformers` (Qwen 2.5 1.5B), behind a provider interface that can switch to OpenAI. A numeric-grounding guard blocks any reply containing numbers absent from the input, and an auto-generated, auto-graded Q&A benchmark scores 92% / 88% on two real shops. Data side: idempotent hash-based ingestion, per-shop SQLite isolation, period-aware analysis, and 579 automated tests in this public repo. The free online demo (Streamlit Community Cloud) cannot run the model, so it serves answers precomputed by the same local model through a cache-only provider whose cache keys match; live inference runs locally or in Docker. All data in this repo and in the online demo is synthetic (a fictional clothing shop generated with a fixed random seed); the real shops' reports are not published.
+ShopPilot turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations, served as a Streamlit dashboard. Every number is computed deterministically (pandas, SQL, statistical tests); an optional LLM layer only rewrites those results in plain language. The LLM runs locally by default via Hugging Face `transformers` (Qwen 2.5 1.5B), behind a provider interface that can switch to OpenAI. A numeric-grounding guard blocks any reply containing numbers absent from the input, and an auto-generated, auto-graded Q&A benchmark scores 92% / 88% on two real shops. Data side: idempotent hash-based ingestion, per-shop SQLite isolation, period-aware analysis, and 580 automated tests in this public repo. The free online demo (Streamlit Community Cloud) cannot run the model, so it serves answers precomputed by the same local model through a cache-only provider whose cache keys match; live inference runs locally or in Docker. All data in this repo and in the online demo is synthetic (a fictional clothing shop generated with a fixed random seed); the real shops' reports are not published.
 
 ## 技術重點
 
@@ -84,7 +84,7 @@ ShopPilot turns Shopee seller-center reports into product-level competitor analy
 
 ### 測試
 
-- 這個公開版有 579 個自動化測試（`python -m pytest`）：單元測試、Dashboard 畫面測試（Streamlit `AppTest`），以及用示範資料跑完整流程的測試。
+- 這個公開版有 580 個自動化測試（`python -m pytest`）：單元測試、Dashboard 畫面測試（Streamlit `AppTest`），以及用示範資料跑完整流程的測試。
 - 每次 push 都由 GitHub Actions（`.github/workflows/tests.yml`）在 Ubuntu、Python 3.13 上只裝 `requirements.txt` 跑完整測試，結果見開頭的徽章。`requirements.txt` 是固定版本，和線上 demo 安裝的完全相同。
 - 私人版另外有一組**真實資料測試**：用每家店每個期間的真實報表（複製到暫存資料夾，不動真正的資料庫）檢查匯入、加總、每個商品的分析、建議依據、AI 資料表大小，並實際切到該期間檢查 Dashboard 各分頁。這些測試綁定真實資料，不放進公開版。
 - AI 相關的測試用假的模型，不需要下載模型也能跑。
@@ -141,7 +141,7 @@ docker run -p 7860:7860 shoppilot
    這個 repo 由私人版的 `scripts/export_public.py` 產生，每次匯出都會在 `main` 加一個新 commit。**第一次推送時 `main` 應該只有一個 commit**：推送前如果已經匯出過好幾次，先刪掉這個資料夾（或它的 `.git`）再重新匯出一次。之後每次匯出的新 commit 照常推送即可。
 2. GitHub：`git remote add origin <GitHub repo>`，再 `git push -u origin main`。
 3. Streamlit Community Cloud（share.streamlit.io，用 GitHub 帳號登入）：Create app → 選這個 repo、分支 `main`、Main file path 填 `streamlit_app.py`；Advanced settings 選 Python 3.13，Secrets 填 `SHOPPILOT_REPO_URL = "<GitHub repo 網址>"`（側欄才會出現「原始碼與說明（GitHub）」連結）。
-4. `streamlit_app.py` 會自動開啟展示模式和只讀快取的 AI，並把示範資料庫複製到暫存資料夾再用；之後推送到 `main`，雲端會自動更新。
+4. `streamlit_app.py` 會自動開啟展示模式和只讀快取的 AI，並把示範資料庫複製到暫存資料夾再用；之後推送到 `main`，雲端會自動更新（demo/ 的檔案有變就重新複製，不用手動 Reboot）。
 
 ## 文件
 
