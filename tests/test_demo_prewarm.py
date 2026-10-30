@@ -97,6 +97,53 @@ def test_wrong_answers_are_not_cached(analysis):
     assert len(qa_inputs) == len(prewarm.EXAMPLE_KINDS) - 1          # 答對的照樣留著
 
 
+class BadTodoProvider(AnswerKeyProvider):
+    """「最該先處理的事」照樣答出標準答案的商品，但用 reply 決定怎麼寫；其他題目和 AnswerKeyProvider 一樣。"""
+
+    def __init__(self, questions, reply):
+        super().__init__(questions)
+        self.reply = reply
+
+    def generate(self, system, user):
+        if "問題：本期最該先處理的是什麼？" in user:
+            self.calls += 1
+            q = self.by_text["本期最該先處理的是什麼？"]
+            text, tokens_out = self.reply(q)
+            return LLMReply(text, 1, tokens_out, self.model)
+        return super().generate(system, user)
+
+
+def _todo_example(analysis, reply, cfg=None):
+    qs = generate_questions(analysis)
+    cache = DictCache()
+    result = prewarm.prewarm(analysis, BadTodoProvider(qs, reply), cache,
+                             cfg or {"prompt_version": "v2", "max_output_tokens": 400}, log=lambda *_: None)
+    cached = [row["input_json"] for row in cache.rows.values() if row["task"] == "shop_qa"]
+    return result, any(text.endswith("問題：本期最該先處理的是什麼？") for text in cached)
+
+
+def test_examples_use_strict_grading(analysis):
+    # 2026-10-29 實例：示範資料的回答先說銷量第 1 的商品要補貨，才提到真正缺貨的商品，grade 照樣算答對
+    result, cached = _todo_example(analysis, lambda q: (f"先補 {q.others[0][-1]}，其次是 {q.expected[-1]}。", 30))
+    assert "todo_first" in result.skipped_kinds and not cached
+    result, cached = _todo_example(analysis, lambda q: (f"先補 {q.expected[-1]}，其次是 {q.others[0][-1]}。", 30))
+    assert "todo_first" not in result.skipped_kinds and cached
+
+
+def test_examples_without_simplified_chinese(analysis):
+    # 2026-10-30 實例：線上 demo 的回答寫成「问题」「依据」「建议做法」
+    result, cached = _todo_example(analysis, lambda q: (f"先補 {q.expected[-1]}。问题：全部規格缺貨。", 30))
+    assert "todo_first" in result.skipped_kinds and not cached
+
+
+def test_examples_are_not_cut_off(analysis):
+    # 2026-10-30 實例：回答寫到輸出上限 400 tokens，停在「因此需要優」
+    result, cached = _todo_example(analysis, lambda q: (f"先補 {q.expected[-1]}，因此需要優", 400))
+    assert "todo_first" in result.skipped_kinds and not cached
+    result, _ = _todo_example(analysis, lambda q: (f"先補 {q.expected[-1]}。", 399))
+    assert "todo_first" not in result.skipped_kinds
+
+
 def test_read_examples_handles_bad_files(tmp_path):
     assert prewarm.read_examples(tmp_path / "missing.json") is None
     (tmp_path / "bad.json").write_text("{", encoding="utf-8")
