@@ -1,0 +1,18 @@
+# AI 文字解釋（選用）。AI 無法使用或設定停用時，核心分析照常運作。
+# 預設用本機模型（不用 API Key、資料不離開電腦）；改用 OpenAI 時，API Key 請放在環境變數 OPENAI_API_KEY
+# 或專案根目錄的 .env（OPENAI_API_KEY=...），不要寫在這裡。
+enabled: true            # false：完全停用 AI
+provider: local          # local（本機 Hugging Face 模型，見下方 local）| openai | none
+model: gpt-4o-mini       # provider: openai 時用的模型，可以改成你帳號可用的其他模型
+max_output_tokens: 400   # 每次最多產生多少 token（控制成本；本機模型則控制等待時間）
+timeout_seconds: 20
+prompt_version: v2       # 改了 prompt 或數字檢查規則就換版本號，舊的快取才不會被誤用
+
+# provider: local 時使用。需要另外安裝：pip install -r requirements-local.txt
+# 第一次按「AI 分析」會從 Hugging Face 下載模型（1.5B 約 3 GB）並載入，要等幾分鐘；之後不用網路。
+local:
+  model: Qwen/Qwen2.5-1.5B-Instruct  # 0.5B 較快但較常寫出資料裡沒有的數字；3B 以上建議用顯示卡
+  device: auto           # auto（有可用的 NVIDIA 顯示卡就用）| cpu | cuda
+  dtype: auto            # auto（顯示卡 float16、CPU float32）| float32 | float16 | bfloat16
+  temperature: 0         # 0：每次挑最可能的字，結果固定、最不容易亂寫數字；> 0 越大越有變化
+  offline: false         # true：只用已下載的模型、完全不連網（外出展示時可以打開）

@@ -1,0 +1,16 @@
+# 公開版：示範資料（demo/）要進版控；其他報表、資料庫、金鑰一律不進
+/data/
+*.xlsx
+*.xls
+*.csv
+*.db
+!demo/**
+.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# 匯出程式留下的標記檔（只在公開版資料夾裡）
+.shoppilot-public

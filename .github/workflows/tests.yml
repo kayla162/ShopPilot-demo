@@ -1,0 +1,26 @@
+# 每次 push 都在乾淨的 Ubuntu 上跑完整測試。只裝 requirements.txt：本機模型（requirements-local.txt）和
+# OpenAI 套件都不裝，AI 相關的測試用假的模型，不需要下載模型。
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true                  # demo/shoppilot.db 用 Git LFS 存放，tests/test_streamlit_entry.py 要用到
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"     # 和 Streamlit Community Cloud 一致
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
