@@ -61,10 +61,11 @@ def test_blocked_and_failed_answers_are_logged_too(tmp_path, analysis):
     assert (row["status"], row["answer"], row["provider"]) == ("blocked", "回答裡有資料沒有的數字", "local")
 
 
-def test_record_failure_does_not_raise(analysis):
+def test_record_failure_does_not_raise(tmp_path, analysis):
     res = Explanation("ok", text="x")
-    assert question_log.record(object(), "q", None, analysis, None, {}, res) is None   # 路徑不對：寫不進去
-    assert question_log.rate(object(), 1, "correct") is False
+    # 路徑是資料夾：開不了資料庫（Windows、Linux 都一樣；object() 的字串在 Linux 是合法檔名，CI 曾經寫進去）
+    assert question_log.record(tmp_path, "q", None, analysis, None, {}, res) is None
+    assert question_log.rate(tmp_path, 1, "correct") is False
 
 
 def test_invalid_verdict_rejected():
