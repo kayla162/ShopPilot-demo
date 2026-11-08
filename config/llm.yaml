@@ -9,6 +9,7 @@ max_output_tokens: 400   # 每次最多產生多少 token（控制成本；本�
 timeout_seconds: 20
 prompt_version: v2       # 改了 prompt 或數字檢查規則就換版本號，舊的快取才不會被誤用
 qa_mode: table           # AI 問答的做法：table（每題送一份資料表）| tools（模型自己呼叫工具查資料，見 shoppilot/llm/qa_tools.py）
+qa_log: true             # 記下 AI 問答的提問和回答（賣場自己的資料庫，不進版控），回答下面可以按 👍／👎；評估用，見 shoppilot/llm/question_log.py
 
 # provider: local 時使用。需要另外安裝：pip install -r requirements-local.txt
 # 第一次按「AI 分析」會從 Hugging Face 下載模型（1.5B 約 3 GB）並載入，要等幾分鐘；之後不用網路。

@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS ai_call_log (
   mode TEXT, status TEXT, latency_ms INTEGER, tokens_in INTEGER, tokens_out INTEGER, tool_calls INTEGER,
   rounds INTEGER, error_kind TEXT);
 
+CREATE TABLE IF NOT EXISTS qa_question_log (
+  id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP, question TEXT, product_id TEXT, period TEXT,
+  mode TEXT, provider TEXT, model TEXT, status TEXT, answer TEXT, tools TEXT, verdict TEXT);
+
 CREATE VIEW IF NOT EXISTS v_product_price_stock AS
 SELECT snapshot_at, product_id,
        MIN(price) AS price, MAX(price) AS price_max, COUNT(*) AS sku_count,
@@ -86,6 +90,8 @@ AI_FIELDS = ["task", "entity_id", "input_hash", "input_json", "output_text", "mo
              "tokens_in", "tokens_out"]
 AI_CALL_FIELDS = ["task", "provider", "model", "mode", "status", "latency_ms", "tokens_in", "tokens_out", "tool_calls",
                   "rounds", "error_kind"]
+QA_LOG_FIELDS = ["question", "product_id", "period", "mode", "provider", "model", "status", "answer", "tools"]
+QA_VERDICTS = ("correct", "wrong")
 
 
 def connect(path) -> sqlite3.Connection:
@@ -320,5 +326,29 @@ def read_ai_calls(conn, days: int | None = None) -> list[dict]:
     """AI 呼叫紀錄，新的在前面；days 只取最近幾天。"""
     where = f"WHERE created_at >= datetime('now', '-{int(days)} days')" if days else ""
     cur = conn.execute(f"SELECT created_at, {', '.join(AI_CALL_FIELDS)} FROM ai_call_log {where} ORDER BY id DESC")
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def log_question(conn, row: dict) -> int:
+    """AI 問答的提問紀錄（賣家實際問的問題和回答，見 shoppilot/llm/question_log.py），回傳紀錄的 id。"""
+    with conn:
+        cur = conn.execute(_insert_sql("qa_question_log", QA_LOG_FIELDS), tuple(_py(row.get(f)) for f in QA_LOG_FIELDS))
+    return int(cur.lastrowid)
+
+
+def set_question_verdict(conn, log_id: int, verdict: str | None) -> None:
+    """賣家判斷的對錯：correct | wrong | None（取消）。"""
+    if verdict is not None and verdict not in QA_VERDICTS:
+        raise ValueError(f"不認得的判斷：{verdict}")
+    with conn:
+        conn.execute("UPDATE qa_question_log SET verdict = ? WHERE id = ?", (verdict, int(log_id)))
+
+
+def read_questions(conn, days: int | None = None) -> list[dict]:
+    """提問紀錄，新的在前面；days 只取最近幾天。"""
+    where = f"WHERE created_at >= datetime('now', '-{int(days)} days')" if days else ""
+    cur = conn.execute(f"SELECT id, created_at, {', '.join(QA_LOG_FIELDS)}, verdict FROM qa_question_log {where} "
+                       "ORDER BY id DESC")
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]

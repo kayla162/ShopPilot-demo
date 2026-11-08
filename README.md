@@ -4,7 +4,17 @@
 
 把蝦皮賣家中心的報表變成商品層級的競品分析與優化建議；數字全部由程式計算，本機 AI 模型負責把結果寫成白話。
 
-> Turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations. Numbers are computed deterministically (pandas, SQL, statistical tests); a local Qwen 2.5 1.5B model answers seller questions through **tool calling**, behind a numeric-grounding guard. A **QLoRA** fine-tune on program-generated trajectories (6 GB laptop GPU, 44 min) lifts tool-calling accuracy from 59% to **96%** on 141 auto-graded questions across three shops (same 4-bit model, McNemar p < 1e-11), on par with a 5× larger Qwen3 8B; three data versions were compared with error analysis and a held-out hand-written set, and the release was chosen by failure mode (fewest confidently wrong numbers). The adapter is [published on Hugging Face](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) as PEFT weights and a GGUF adapter for llama.cpp; **llama.cpp 4-bit** inference cuts CPU latency from 50 s to 3.6 s per answer; answers stream token by token, and every call is logged to a monitoring tab (p50/p95 latency, cache hits, guard blocks). 672 automated tests in this public repo.
+**30 秒看懂**
+
+| | |
+|---|---|
+| **做什麼** | 賣家用中文問「這件本期賣了幾件？」「長褲裡哪件最熱銷？」，1.5B 本機模型自己呼叫工具查資料回答；數字由程式算，回答裡出現資料沒有的數字就擋下 |
+| **59% → 96%** | QLoRA 微調（程式產生的訓練資料、6 GB 筆電顯示卡 44 分鐘）讓同一個 4-bit 模型的工具呼叫答對率大幅提升（141 題，McNemar p < 10⁻¹¹），和 5 倍大的 Qwen3 8B（94%）相當 |
+| **50 秒 → 3.6 秒** | llama.cpp 4-bit 量化，一般筆電的 CPU 就能即時回答 |
+| **評估** | 題目和標準答案由程式算出、自動評分，附信賴區間和成對檢定；手寫口語題的開發集和最終測試分開；賣家可以對每個回答按 👍／👎，真實提問能匯出重跑 |
+| **連結** | [線上 demo](https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/) · [Hugging Face 模型](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) · [技術文章：讓 1.5B 模型學會用工具](docs/lora_case_study.md)（[English](docs/lora_case_study_en.md)） |
+
+> Turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations. Numbers are computed deterministically (pandas, SQL, statistical tests); a local Qwen 2.5 1.5B model answers seller questions through **tool calling**, behind a numeric-grounding guard. A **QLoRA** fine-tune on program-generated trajectories (6 GB laptop GPU, 44 min) lifts tool-calling accuracy from 59% to **96%** on 141 auto-graded questions across three shops (same 4-bit model, McNemar p < 1e-11), on par with a 5× larger Qwen3 8B; three data versions were compared with error analysis and a held-out hand-written set, and the release was chosen by failure mode (fewest confidently wrong numbers). The adapter is [published on Hugging Face](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) as PEFT weights and a GGUF adapter for llama.cpp; **llama.cpp 4-bit** inference cuts CPU latency from 50 s to 3.6 s per answer; answers stream token by token, and every call is logged to a monitoring tab (p50/p95 latency, cache hits, guard blocks); sellers rate answers 👍/👎, and logged real questions can be exported and re-run as an evaluation set. A [case study](docs/lora_case_study_en.md) walks through the whole fine-tuning process. 686 automated tests in this public repo.
 
 - **線上 demo：** https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/
 - **本機執行：** 見[快速開始](#快速開始)
@@ -43,7 +53,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 | **llama.cpp（GGUF 量化）** | CPU 上的快速推論 | 4-bit 量化讓 CPU 回答從數十秒降到幾秒，權重記憶體少一半以上 |
 | **OpenAI 相容 API（選用）** | 同一個 provider 介面的另一種實作（含工具呼叫、串流）；接 OpenAI，或本機的 Ollama、vLLM | 需要更大的模型時改設定檔一行就能切換；評估用它接 Ollama 的 Qwen3 8B 當對照 |
 | **sentence-transformers** | 外部競品自動配對的 embedding 評估 | 和不用模型的字元相似度用同一套指標比較，用數據決定要不要上模型 |
-| **pytest、GitHub Actions** | 672 個自動化測試，每次 push 自動跑 | 分析結果是給賣家做決策用的，每個數字都要能被驗證 |
+| **pytest、GitHub Actions** | 686 個自動化測試，每次 push 自動跑 | 分析結果是給賣家做決策用的，每個數字都要能被驗證 |
 | **Docker、Streamlit Community Cloud、Git LFS** | 完整版容器、線上 demo、示範資料 | Docker 版內含模型、離線可用；線上 demo 免安裝就能看；資料庫與截圖用 LFS 存放 |
 
 ## 架構
@@ -136,6 +146,8 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 
 每次「AI 分析」「AI 問答」都寫一筆紀錄（延遲、輸入／輸出 tokens、快取命中、被數字檢查擋下、錯誤原因、工具呼叫次數、模型呼叫輪數），「AI 監控」分頁顯示快取命中率、延遲 p50／p95、擋下比例、錯誤率、輸出速度，並依模型、依問答做法分組。延遲只算真的呼叫了模型的紀錄，快取命中不算進去，免得數字看起來太好。寫紀錄失敗不影響回答。
 
+**賣家回饋：** 「AI 問答」每一題都記下問題、回答、AI 查了哪些資料和當時的資料期間，賣家可以在回答下面按 👍／👎；「AI 監控」分頁照模型和做法顯示賣家判斷的答對率，也列出最近的提問，方便做錯誤分析。紀錄只存在賣場自己的資料庫（線上 demo 不記）。
+
 ### 評估：題目和答案都由程式算出
 
 - **自動出題、自動評分：** 題目和標準答案都由程式從同一份資料算出（賣最好的類別、某商品的價格／類別／銷量、某類別賣最好的商品、側欄選的商品、賣場沒有的東西…），換賣場、換期間都能重跑。
@@ -144,6 +156,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 - **開發集與評估分開：** 改 prompt、資料表、工具回傳時只看開發集（換亂數種子的示範賣場、換句話說的問法）；LoRA 的訓練資料用另外的亂數種子，也不收評估和口語題的原句。
 - **統計：** 正確率附 Wilson 95% 信賴區間；兩個做法答同一批題目，用 McNemar 精確檢定和成對 bootstrap 比較差距（`python -m shoppilot.llm.eval_stats`）。
 - **大模型對照：** 透過 OpenAI 相容的 API 接本機 Ollama 的 Qwen3 8B（關掉思考模式），用同樣的工具、同樣的 prompt 回答，作為參數量 5 倍的參考。
+- **賣家實際提問：** `python -m shoppilot.llm.real_eval export` 把提問紀錄匯出成題目檔（同樣的問題只留一題，保留當時側欄選的商品）；標準答案可以用和口語題相同的寫法（答案每次從資料算，匯入新報表後照樣能評），`python -m shoppilot.llm.qa_eval --real` 就能換模型、換做法重跑同一批真實提問，和其他評估一樣輸出 `details.csv`、可以用 `eval_stats` 比較。
 - **示範賣場任何人都能重跑：** `python -m shoppilot.llm.qa_eval --demo --extended --mode tools`、`--handwritten b`；另外兩家是真實賣場，資料不公開。
 
 3 個賣場（示範賣場＋兩家真實賣場）、每家 32 題原本的題目＋15 題長尾商品題，共 141 題；口語題各 30 題（示範賣場）。除了 Qwen3 8B，都是 Q4_K_M 量化模型、llama.cpp、CPU：
@@ -188,7 +201,7 @@ Recall@3 最高的是 bigram/raw 和 e5-base/core（都是 69%），依事先定
 
 ### 測試
 
-- 這個公開版有 672 個自動化測試（`python -m pytest`）：單元測試、Dashboard 畫面測試（Streamlit `AppTest`），以及用示範資料跑完整流程的測試；AI 相關測試用假的模型，不必下載模型。
+- 這個公開版有 686 個自動化測試（`python -m pytest`）：單元測試、Dashboard 畫面測試（Streamlit `AppTest`），以及用示範資料跑完整流程的測試；AI 相關測試用假的模型，不必下載模型。
 - 每次 push 都由 GitHub Actions 在 Ubuntu、Python 3.13 上只裝 `requirements.txt` 跑完整測試（見開頭徽章）；套件版本固定，和線上 demo 安裝的完全相同。
 - 私人版另有一組**真實資料測試**：用每家店每個期間的真實報表檢查匯入、加總、每個商品的分析、建議依據，並實際切到該期間檢查 Dashboard 各分頁。
 
@@ -273,6 +286,7 @@ docker run -p 7860:7860 shoppilot
 
 | 想看什麼 | 從這裡開始 |
 |---|---|
+| LoRA 微調的完整過程（做法、訓練資料、公平比較、版本選擇） | [docs/lora_case_study.md](docs/lora_case_study.md)（[English](docs/lora_case_study_en.md)） |
 | 本機模型怎麼載入、推論 | `shoppilot/llm/local_provider.py` |
 | 數字防捏造檢查、AI 文字解釋 | `shoppilot/llm/explainer.py` |
 | AI 問答怎麼依問題組資料表 | `shoppilot/llm/qa.py`、`shoppilot/llm/prompts/shop_qa.md` |
@@ -284,6 +298,7 @@ docker run -p 7860:7860 shoppilot
 | 量化推論（llama.cpp） | `shoppilot/llm/llamacpp_provider.py` |
 | OpenAI 相容服務（OpenAI、Ollama、vLLM）的工具呼叫 | `shoppilot/llm/openai_provider.py` |
 | 呼叫紀錄與監控指標 | `shoppilot/llm/telemetry.py`、`dashboard/views/ai_monitor.py` |
+| 賣家提問紀錄、👍／👎、用真實提問評估 | `shoppilot/llm/question_log.py`、`shoppilot/llm/real_eval.py` |
 | 線上 demo 的只讀快取 provider | `shoppilot/llm/cache_only_provider.py` |
 | 模型比較 | `shoppilot/llm/benchmark.py`（`python -m shoppilot.llm.benchmark`） |
 | 外部競品配對與評估 | `shoppilot/match/`（`python -m shoppilot.match.evaluate`） |

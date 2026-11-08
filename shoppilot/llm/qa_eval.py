@@ -11,6 +11,7 @@
     python -m shoppilot.llm.qa_eval --provider llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf   # 換模型（格式同 benchmark）
     python -m shoppilot.llm.qa_eval --handwritten       # 口語題 A（示範賣場，題目是手寫的口語，見 eval_sets/）
     python -m shoppilot.llm.qa_eval --handwritten b     # 口語題 B（最終測試）
+    python -m shoppilot.llm.qa_eval --real --shop <賣場> --mode tools  # 賣家實際問過的問題（見 real_eval.py）
 
 每一題的結果分成：
     correct   答對：回答裡有標準答案（貨號、商品名稱、類別、數字）
@@ -64,6 +65,8 @@ HW_LABELS = {"shop_top": "銷量最高的商品", "category_top": "賣最好的�
              "price_units": "價格和銷量", "best_price": "賣最好的那件的價格", "best_units": "賣最好的那件的銷量",
              "has_category": "有沒有賣某類", "absent": "資料沒有的事"}
 KIND_LABELS.update({f"hw_{k}": f"口語題：{v}" for k, v in HW_LABELS.items()})
+# 賣家實際問過的問題（shoppilot/llm/real_eval.py）：type 寫的答案沿用口語題的題型，手寫的答案是 real_manual
+KIND_LABELS.update({"real_manual": "賣家提問：手寫的答案", **{f"real_{k}": f"賣家提問：{v}" for k, v in HW_LABELS.items()}})
 DEV_SEEDS = (1, 2, 3)        # 開發集的示範資料亂數種子；評估用的示範資料是 seed 42
 DEMO_SEED = 42               # 線上 demo 的示範賣場
 # 問側欄選的商品：每個商品一組說法（2026-10-29 補上的說法放第二組）
@@ -183,23 +186,31 @@ def handwritten_questions(analysis, path: Path = HANDWRITTEN) -> list[Question]:
     """口語題（題目手寫、答案由程式從資料算出），格式見 eval_sets/handwritten_demo.yaml 的說明。
     只有 sidebar: true 的題目帶商品（像在 Dashboard 側欄選了商品才問）；其他題目不帶，商品要模型自己找。"""
     import yaml
-    spec = yaml.safe_load(path.read_text(encoding="utf-8"))["questions"]
+    return spec_questions(analysis, yaml.safe_load(path.read_text(encoding="utf-8"))["questions"], path.name)
+
+
+def spec_questions(analysis, spec: list[dict], source: str = "題目檔") -> list[Question]:
+    """用 type 寫的標準答案（口語題、賣家實際提問共用）：答案每次都從 analysis 算，資料更新了答案跟著變。
+    商品用 product（商品名稱，完全相同）或 product_id 指定。"""
     reg = analysis.regular()
     by_units = reg.sort_values(["units", "impressions"], ascending=False)
     none = not (by_units["units"] > 0).any()
     cat_units = reg.groupby("category")["units"].sum().sort_values(ascending=False)
     cat_units = cat_units[cat_units.index != "未分類"]
 
-    def product(name: str):
-        match = reg[reg["core_title"].astype(str) == name]
+    def product(item: dict):
+        if item.get("product_id") is not None:
+            match = reg[reg["product_id"].astype(str) == str(item["product_id"])]
+        else:
+            match = reg[reg["core_title"].astype(str) == item.get("product")]
         if match.empty:
-            raise ValueError(f"{path.name}：找不到商品「{name}」")
+            raise ValueError(f"{source}：找不到商品「{item.get('product_id') or item.get('product')}」")
         return match.iloc[0]
 
     def best(cat: str | None):
         g = by_units if not cat else by_units[by_units["category"] == cat]
         if g.empty:
-            raise ValueError(f"{path.name}：沒有「{cat}」類的商品")
+            raise ValueError(f"{source}：沒有「{cat}」類的商品")
         return g.iloc[0]
 
     out = []
@@ -228,7 +239,7 @@ def handwritten_questions(analysis, path: Path = HANDWRITTEN) -> list[Question]:
         elif t == "category_count":
             q.number = float((reg["category"] == item["category"]).sum())
         elif t in ("price", "units", "category_of", "price_units"):
-            r = product(item["product"])
+            r = product(item)
             if t == "price":
                 q.number = float(r["price"])
             elif t == "units":
@@ -247,7 +258,7 @@ def handwritten_questions(analysis, path: Path = HANDWRITTEN) -> list[Question]:
         elif t == "absent":
             q.expect_unknown, q.absent_item = True, item["item"]
         else:
-            raise ValueError(f"{path.name}：不認得的 type「{t}」")
+            raise ValueError(f"{source}：不認得的 type「{t}」")
         out.append(q)
     return out
 
@@ -553,6 +564,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="另外加上長尾商品題（銷量 31 名以後的商品、用簡稱問），和原本的題目分開計分")
     parser.add_argument("--handwritten", nargs="?", const="a", choices=sorted(HANDWRITTEN_SETS), default=None,
                         help="改跑口語題 a（預設）或 b（示範賣場；題目手寫在 eval_sets/，答案由程式算出）")
+    parser.add_argument("--real", action="store_true",
+                        help="改跑賣家實際問過的問題（--shop 的賣場資料夾裡的 real_questions.yaml，見 shoppilot/llm/real_eval.py）")
     parser.add_argument("--mode", choices=("table", "tools"), default=None,
                         help="AI 問答的做法：table（資料表）| tools（工具呼叫）；預設照 config/llm.yaml 的 qa_mode")
     parser.add_argument("--provider", default=None,
@@ -565,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.no_sales and not args.dev:
         parser.error("--no-sales 要和 --dev 一起用")
+    if args.real and (args.dev or args.demo or args.handwritten or args.extended or args.sidebar):
+        parser.error("--real 不能和 --dev、--demo、--handwritten、--extended、--sidebar 一起用（每題已經帶賣家當時選的商品）")
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
@@ -598,9 +613,23 @@ def main(argv: list[str] | None = None) -> int:
             analysis = Analysis(load_dataset(conn), shops.load_config(args.shop, "keywords"),
                                 shops.load_config(args.shop, "rules"))
         shop_name = args.shop
+    note = ""
     try:
-        questions = (handwritten_questions(analysis, HANDWRITTEN_SETS[args.handwritten]) if args.handwritten
-                     else generate_questions(analysis, args.per_kind))
+        if args.real:
+            from shoppilot.llm import real_eval
+            path = real_eval.path_for(args.shop)
+            questions, skipped, errors = real_eval.build_questions(analysis, real_eval.load(path))
+            note = f"賣家實際提問（{path.name}），跳過：{real_eval.skipped_text(skipped)}"
+            for e in errors:
+                print(f"  跳過：{e}", file=sys.stderr)
+            if not questions:
+                print(f"{path} 沒有可以評的題目（{note}）。先跑 python -m shoppilot.llm.real_eval export "
+                      f"--shop {args.shop}，再補上標準答案。", file=sys.stderr)
+                return 1
+            shop_name = f"{args.shop} 賣家實際提問"
+        else:
+            questions = (handwritten_questions(analysis, HANDWRITTEN_SETS[args.handwritten]) if args.handwritten
+                         else generate_questions(analysis, args.per_kind))
     except ValueError as e:
         print(f"無法出題：{e}", file=sys.stderr)
         return 1
@@ -614,11 +643,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{shop_name}：{len(questions)} 題，模型 {provider.model}，做法 {mode}" + (f"，側欄商品 {label}" if label else ""))
     results = run_eval(analysis, questions, provider, cfg, sidebar=sidebar, progress=_progress())
     md = to_markdown(summarize(results), shop_name, provider.model, _period(analysis), label, mode)
+    if note:
+        md = md.replace("- 側欄商品：不帶", "- 側欄商品：每題帶賣家當時側欄選的商品") + f"\n{note}。\n"
     default_dir = (Path(tempfile.gettempdir()) / "shoppilot_qa_demo" if args.demo or args.handwritten
                    else shops.shop_dir(args.shop) / "qa_eval")
     out_dir = args.out or default_dir / stamp
     write_outputs(out_dir, results, md, {"shop": shop_name, "model": provider.model, "mode": mode,
-                                         "set": f"handwritten_{args.handwritten}" if args.handwritten else "eval",
+                                         "set": f"handwritten_{args.handwritten}" if args.handwritten
+                                         else "real" if args.real else "eval",
                                          "sidebar": label})
     print()
     print(md)

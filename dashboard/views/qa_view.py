@@ -7,6 +7,7 @@ from dashboard.views import common
 from shoppilot import config
 from shoppilot.demo.prewarm import EXAMPLES_FILE, read_examples
 from shoppilot.db import SqliteAICache
+from shoppilot.llm import question_log
 from shoppilot.llm.base import KIND_LABELS, UNAVAILABLE_MSG
 from shoppilot.llm.explainer import Explanation, make_provider
 from shoppilot.llm.qa import MAX_QUESTION_LEN, answer_question
@@ -15,6 +16,7 @@ MAX_HISTORY = 20
 EXAMPLES = "例如：「哪個類別賣最好？」「銷量最高的商品是哪個？」「背心類價格最高的是哪個？」「本期最該先處理什麼？」"
 WAIT_MSG = "AI 正在回答，如果有其他人在問會排隊，請稍候…（第一次要載入模型，可能需要幾分鐘）"
 DEMO_HINT = "免費 CPU 主機，每題約 30–60 秒；範例問題已預先算好。"
+FEEDBACK_HINT = "答對了嗎？（記在這台電腦的賣場資料庫，用來評估 AI；「AI 監控」分頁看得到統計）"
 CACHE_ONLY_HINT = ("線上 demo 只提供預先算好的答案（免費主機跑不動模型），請點上面的範例問題；"
                    "要自己提問，請在本機或用 Docker 執行（見 README）。")
 
@@ -24,7 +26,21 @@ def _answer_md(text: str) -> str:
     return common.md_escape(text.replace("**", "")).replace("\n", "  \n")
 
 
-def _show(msg: dict) -> None:
+def _rate(db_path, log_id: int, key: str) -> None:
+    value = st.session_state.get(key)          # st.feedback("thumbs")：1 = 👍、0 = 👎、None = 取消
+    question_log.rate(db_path, log_id, None if value is None else "correct" if value == 1 else "wrong")
+
+
+def _feedback(msg: dict, db_path) -> None:
+    log_id = msg.get("log_id")
+    if log_id is None or msg["result"].status not in ("ok", "cached"):
+        return
+    st.caption(FEEDBACK_HINT)
+    key = f"qa_feedback::{db_path}::{log_id}"
+    st.feedback("thumbs", key=key, on_change=_rate, args=(db_path, log_id, key))
+
+
+def _show(msg: dict, db_path=None) -> None:
     with st.chat_message(msg["role"]):
         if msg["role"] == "user":
             st.markdown(common.md_escape(msg["text"]))
@@ -40,6 +56,7 @@ def _show(msg: dict) -> None:
             st.warning(common.md_escape(result.message))
             if result.reason:
                 st.caption(f"原因：{common.md_escape(result.reason)}")
+        _feedback(msg, db_path)
 
 
 def render(ctx: common.Ctx) -> None:
@@ -60,7 +77,7 @@ def render(ctx: common.Ctx) -> None:
     elif not usable:
         st.info("還沒有可以分析的資料，先匯入報表才能提問。")
     for msg in history:
-        _show(msg)
+        _show(msg, ctx.db_path)
     if history and st.button("清除對話", key=f"qa_clear::{ctx.db_path}"):
         st.session_state[key] = []
         st.rerun()
@@ -98,10 +115,15 @@ def render(ctx: common.Ctx) -> None:
 
         with st.spinner(WAIT_MSG if local else "AI 思考中…"):
             try:
-                result = answer_question(ctx.analysis, question, product_id, make_provider(ctx.llm_cfg),
+                provider = make_provider(ctx.llm_cfg)
+                result = answer_question(ctx.analysis, question, product_id, provider,
                                          SqliteAICache(ctx.db_path), ctx.llm_cfg, on_token=on_token)
             except Exception:  # noqa: BLE001 — AI 設定或快取出錯也只停在這個分頁
+                provider = None
                 result = Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
-    history += [{"role": "user", "text": question}, {"role": "assistant", "result": result}]
+    log_id = None
+    if question_log.enabled(ctx.llm_cfg, common.demo_mode()):
+        log_id = question_log.record(ctx.db_path, question, product_id, ctx.analysis, provider, ctx.llm_cfg, result)
+    history += [{"role": "user", "text": question}, {"role": "assistant", "result": result, "log_id": log_id}]
     st.session_state[key] = history[-MAX_HISTORY:]
     st.rerun()
