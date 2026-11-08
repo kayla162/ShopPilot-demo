@@ -220,3 +220,58 @@ def test_demo_without_matches_explains(demo_dir, tmp_path, monkeypatch):
     at = run_demo(monkeypatch, data)
     assert any("還沒有計算建議配對" in i.value for i in at.info)
     assert not [d for d in at.dataframe if "建議配對（前 3）" in d.value.columns]
+
+
+class ToolsAnswerKeyProvider:
+    """工具呼叫的假模型：第一輪查銷量排行（前 10 名，範例的價格題都在裡面），第二輪寫出標準答案。"""
+
+    def __init__(self, questions, model):
+        self.by_text, self.model = {q.question: q for q in questions}, model
+
+    def generate(self, system, user):
+        raise AssertionError("工具模式不應該呼叫 generate")
+
+    def chat(self, messages, tools=None, on_token=None):
+        from shoppilot.llm.base import LLMReply, ToolCall
+        if tools and not any(m["role"] == "tool" for m in messages):
+            return LLMReply("", 1, 1, self.model, (ToolCall("get_top_products", {"limit": 10}),))
+        q = self.by_text.get(messages[1]["content"])
+        if q is None or q.expect_unknown:
+            return LLMReply("目前的資料沒有這項資訊。", 1, 1, self.model)
+        return LLMReply(f"答案是 {q.expected[0] if q.expected else f'{q.number:g}'}。", 1, 1, self.model)
+
+
+def test_cache_only_demo_serves_tools_answers_from_another_model(demo_dir, tmp_path, monkeypatch):
+    """範例問題用工具呼叫＋另一個模型（例如 LoRA 的量化模型）預先跑好：examples.json 記下做法和模型，
+    線上 demo 照著切換（public/streamlit_app.py 設 SHOPPILOT_QA_MODE、SHOPPILOT_CACHE_QA_MODEL），快取對得上。"""
+    import shutil
+
+    from shoppilot.analytics.report import Analysis, load_dataset
+    from shoppilot.db import SqliteAICache
+    from shoppilot.demo import prewarm
+    from shoppilot.llm.local_provider import DEFAULT_MODEL
+    from shoppilot.llm.qa_eval import generate_questions
+    from test_demo_prewarm import AnswerKeyProvider
+
+    data = tmp_path / "data"
+    shutil.copytree(demo_dir, data)
+    cfg = config.load_yaml("llm")
+    with closing(db.connect(data / "shoppilot.db")) as conn:
+        a = Analysis(load_dataset(conn, None), config.load_yaml("keywords"), config.load_yaml("rules"))
+    explain = AnswerKeyProvider(generate_questions(a))
+    explain.model = (cfg.get("local") or {}).get("model") or DEFAULT_MODEL
+    qa = ToolsAnswerKeyProvider(generate_questions(a), "Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m+lora:x")
+    result = prewarm.prewarm(a, explain, SqliteAICache(data / "shoppilot.db"), cfg, log=lambda *_: None,
+                             qa_provider=qa, qa_cfg={**cfg, "qa_mode": "tools"})
+    assert (result.qa_mode, result.qa_model) == ("tools", qa.model) and not result.skipped_kinds
+    prewarm.write_examples(data / prewarm.EXAMPLES_FILE, result)
+    assert prewarm.read_examples(data / prewarm.EXAMPLES_FILE)["qa_model"] == qa.model
+
+    monkeypatch.setenv("SHOPPILOT_LLM_PROVIDER", "cache_only")
+    monkeypatch.setenv("SHOPPILOT_QA_MODE", "tools")
+    monkeypatch.setenv("SHOPPILOT_CACHE_QA_MODEL", qa.model)
+    at = run_demo(monkeypatch, data)
+    assert any("AI 自己決定要查什麼" in c.value for c in at.caption)      # 說明換成工具呼叫的做法
+    next(b for b in at.button if b.key == "qa_example::0").click().run()
+    captions = " ".join(c.value for c in at.caption)
+    assert "快取結果" in captions and "AI 查了" in captions

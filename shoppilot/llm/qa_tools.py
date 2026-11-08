@@ -54,6 +54,15 @@ def _squash(s: str) -> str:
     return re.sub(r"\s+", "", str(s or "")).lower()
 
 
+_PUNCT = re.compile(r"[\s【】\[\]()（）「」『』、，,。.:：;；/|+＋~～!！?？\-]+")
+
+
+def _norm(s: str) -> str:
+    """找商品用：去掉空白和標點（含【】）。模型常把「【植村秀】山茶花…」寫成「植村秀 山茶花…」，只去空白比不到
+    （2026-11-08 評估實例：比不到之後改用字元相似度，挑到名稱較短的另一個容量的商品）。"""
+    return _PUNCT.sub("", str(s or "")).lower()
+
+
 def _bigrams(s: str) -> set[str]:
     s = _squash(s)
     return {s[i:i + 2] for i in range(len(s) - 1)}
@@ -115,19 +124,28 @@ class ShopTools:
         return {"範圍": f"{category}類" if category else "全店", "銷量最高的商品": best, **ranking}
 
     def find(self, query: str) -> list[str]:
-        """貨號完全相同 → 名稱互相包含 → 字元雙字詞最相近；回傳 product_id（最多 SEARCH_LIMIT 個）。"""
+        """貨號 → 名稱完全相同 → 查詢是名稱的一部分 → 名稱整個在查詢裡（挑最長的）→ 字元雙字詞最相近；
+        比對時不看空白和標點。回傳 product_id（最多 SEARCH_LIMIT 個）。"""
         p = self.products
         if p.empty or not str(query or "").strip():
             return []
-        q = _squash(query)
+        q = _norm(query)
         codes = [pid for pid, code in zip(p["product_id"], p["code"])
-                 if isinstance(code, str) and code and _squash(code) in q]
+                 if isinstance(code, str) and code and _norm(code) in q]
         if codes:
             return codes[:SEARCH_LIMIT]
-        names = [(pid, _squash(t)) for pid, t in zip(p["product_id"], p["core_title"])]
-        hits = [pid for pid, t in names if len(t) >= 2 and (q in t or (len(t) >= 4 and t in q))]
+        names = [(pid, _norm(t)) for pid, t in zip(p["product_id"], p["core_title"])]
+        exact = [pid for pid, t in names if t == q]
+        if exact:
+            return exact[:SEARCH_LIMIT]
+        hits = [pid for pid, t in names if len(t) >= 2 and q in t]
         if hits:
             return hits[:SEARCH_LIMIT]
+        # 商品名稱整個出現在查詢裡：挑最長的那個。組合商品「【品牌】A 洗髮露 B 護髮素」的名稱裡常包含單品的名稱，
+        # 全部列出來會變成「有好幾個商品符合」（2026-11-08 產生訓練資料時發現）
+        inside = [(len(t), pid) for pid, t in names if len(t) >= 4 and t in q]
+        if inside:
+            return [max(inside)[1]]
         qb = _bigrams(query)
         scored = sorted(((len(qb & _bigrams(t)) / len(qb | _bigrams(t)) if qb else 0, pid) for pid, t in names),
                         reverse=True)

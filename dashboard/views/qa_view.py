@@ -43,8 +43,13 @@ def _show(msg: dict) -> None:
 
 
 def render(ctx: common.Ctx) -> None:
-    st.caption("用白話問賣場的數據。AI 只看程式算好的資料（全店摘要、各類別、重點建議、銷量前幾名，"
-               "以及問題裡提到的商品；問「這個商品」時會帶側欄選的商品），資料裡沒有的數字會被擋下不顯示。送出問題才會呼叫 AI。")
+    if ctx.llm_cfg.get("qa_mode") == "tools":
+        st.caption("用白話問賣場的數據。AI 自己決定要查什麼（全店摘要、類別排行、銷量排行、查商品、搜尋商品、"
+                   "側欄選的商品、最該先處理的事），查詢由程式執行，回答上方會列出 AI 查了哪些資料；"
+                   "工具回傳的結果裡沒有的數字會被擋下不顯示。送出問題才會呼叫 AI。")
+    else:
+        st.caption("用白話問賣場的數據。AI 只看程式算好的資料（全店摘要、各類別、重點建議、銷量前幾名，"
+                   "以及問題裡提到的商品；問「這個商品」時會帶側欄選的商品），資料裡沒有的數字會被擋下不顯示。送出問題才會呼叫 AI。")
     st.caption(EXAMPLES)
     key = f"qa_history::{ctx.db_path}"      # 每個賣場各自的對話紀錄
     history = st.session_state.setdefault(key, [])

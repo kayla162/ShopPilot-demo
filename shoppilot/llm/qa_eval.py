@@ -9,6 +9,8 @@
     python -m shoppilot.llm.qa_eval --demo              # 示範賣場（seed 42，和線上 demo 同一份資料；任何人都能重跑）
     python -m shoppilot.llm.qa_eval --mode tools        # AI 問答的做法：table（資料表）| tools（工具呼叫）
     python -m shoppilot.llm.qa_eval --provider llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf   # 換模型（格式同 benchmark）
+    python -m shoppilot.llm.qa_eval --handwritten       # 口語題 A（示範賣場，題目是手寫的口語，見 eval_sets/）
+    python -m shoppilot.llm.qa_eval --handwritten b     # 口語題 B（最終測試）
 
 每一題的結果分成：
     correct   答對：回答裡有標準答案（貨號、商品名稱、類別、數字）
@@ -52,6 +54,16 @@ KIND_LABELS = {"category_top": "賣最好的類別", "shop_top": "銷量最高�
                "para_shop": "換句話說：銷量最高的商品", "para_cat": "換句話說：某類別賣最好的商品",
                "para_cattop": "換句話說：賣最好的類別", "tail_price": "長尾商品的價格", "tail_units": "長尾商品的銷量",
                "short_price": "用簡稱問價格"}
+EVAL_SETS = Path(__file__).resolve().parent / "eval_sets"
+HANDWRITTEN = EVAL_SETS / "handwritten_demo.yaml"
+# 口語題 A：v1、v2 的錯誤分析看過（之後當開發集）；B：v3 有結果之前寫好的最終測試
+HANDWRITTEN_SETS = {"a": HANDWRITTEN, "b": EVAL_SETS / "handwritten_demo_b.yaml"}
+HW_LABELS = {"shop_top": "銷量最高的商品", "category_top": "賣最好的類別", "count": "商品數", "todo": "最該先處理的事",
+             "top_n": "銷量前幾名", "category_best": "某類別賣最好的商品", "category_units": "某類別的總銷量",
+             "category_count": "某類別的商品數", "price": "商品價格", "units": "商品銷量", "category_of": "商品類別",
+             "price_units": "價格和銷量", "best_price": "賣最好的那件的價格", "best_units": "賣最好的那件的銷量",
+             "has_category": "有沒有賣某類", "absent": "資料沒有的事"}
+KIND_LABELS.update({f"hw_{k}": f"口語題：{v}" for k, v in HW_LABELS.items()})
 DEV_SEEDS = (1, 2, 3)        # 開發集的示範資料亂數種子；評估用的示範資料是 seed 42
 DEMO_SEED = 42               # 線上 demo 的示範賣場
 # 問側欄選的商品：每個商品一組說法（2026-10-29 補上的說法放第二組）
@@ -70,6 +82,9 @@ class Question:
     product_id: str | None = None
     in_sidebar: bool = False                             # 在側欄選了 product_id 之後問的（「這個商品…」）
     others: list[list[str]] = field(default_factory=list)  # 嚴格評分：其他一般商品的字，回答要先提到 expected 的商品
+    all_of: list[list[str]] = field(default_factory=list)   # 每一組都要提到（例如銷量前 3 名都要答出）
+    all_numbers: list[float] = field(default_factory=list)  # 這些數字都要有（例如價格和銷量）
+    absent_item: str | None = None                       # 資料沒有的東西（預設 ABSENT_ITEM）
 
 
 @dataclass
@@ -162,6 +177,79 @@ def generate_questions(analysis, per_kind: int = 5) -> list[Question]:
         qs.append(Question("has_category", f"這家店有賣{cat}嗎？", [cat]))
     qs.append(Question("absent", f"這家店有賣{ABSENT_ITEM}嗎？", expect_unknown=True))
     return qs
+
+
+def handwritten_questions(analysis, path: Path = HANDWRITTEN) -> list[Question]:
+    """口語題（題目手寫、答案由程式從資料算出），格式見 eval_sets/handwritten_demo.yaml 的說明。
+    只有 sidebar: true 的題目帶商品（像在 Dashboard 側欄選了商品才問）；其他題目不帶，商品要模型自己找。"""
+    import yaml
+    spec = yaml.safe_load(path.read_text(encoding="utf-8"))["questions"]
+    reg = analysis.regular()
+    by_units = reg.sort_values(["units", "impressions"], ascending=False)
+    none = not (by_units["units"] > 0).any()
+    cat_units = reg.groupby("category")["units"].sum().sort_values(ascending=False)
+    cat_units = cat_units[cat_units.index != "未分類"]
+
+    def product(name: str):
+        match = reg[reg["core_title"].astype(str) == name]
+        if match.empty:
+            raise ValueError(f"{path.name}：找不到商品「{name}」")
+        return match.iloc[0]
+
+    def best(cat: str | None):
+        g = by_units if not cat else by_units[by_units["category"] == cat]
+        if g.empty:
+            raise ValueError(f"{path.name}：沒有「{cat}」類的商品")
+        return g.iloc[0]
+
+    out = []
+    for item in spec:
+        t, q = item["type"], Question(f"hw_{item['type']}", item["q"])
+        if t == "shop_top":
+            q.expected, q.expect_none = ([] if none else _name_tokens(best(None))), none
+        elif t == "category_top":
+            q.expected, q.expect_none = ([] if none else [cat_units.index[0]]), none
+        elif t == "count":
+            q.number = float(len(reg))
+        elif t == "todo":
+            first = (analysis.shop.get("top_suggestions") or [None])[0]
+            if not first:
+                continue
+            match = reg[reg["product_id"] == first.get("product_id")]
+            q.expected = _name_tokens(match.iloc[0]) if not match.empty else [first["title"]]
+            if not match.empty:
+                q.others = [_name_tokens(r) for _, r in reg[reg["product_id"] != first["product_id"]].iterrows()]
+        elif t == "top_n":
+            q.all_of = [_name_tokens(r) for _, r in by_units.head(int(item["n"])).iterrows()]
+        elif t == "category_best":
+            q.expected = _name_tokens(best(item["category"]))
+        elif t == "category_units":
+            q.number = float(reg.loc[reg["category"] == item["category"], "units"].sum())
+        elif t == "category_count":
+            q.number = float((reg["category"] == item["category"]).sum())
+        elif t in ("price", "units", "category_of", "price_units"):
+            r = product(item["product"])
+            if t == "price":
+                q.number = float(r["price"])
+            elif t == "units":
+                q.number = float(r["units"])
+            elif t == "category_of":
+                q.expected = [r["category"]]
+            else:
+                q.all_numbers = [float(r["price"]), float(r["units"])]
+            if item.get("sidebar"):
+                q.product_id, q.in_sidebar = r["product_id"], True
+        elif t in ("best_price", "best_units"):
+            r = best(item.get("category"))
+            q.number = float(r["price"] if t == "best_price" else r["units"])
+        elif t == "has_category":
+            q.expected = [item["category"]]
+        elif t == "absent":
+            q.expect_unknown, q.absent_item = True, item["item"]
+        else:
+            raise ValueError(f"{path.name}：不認得的 type「{t}」")
+        out.append(q)
+    return out
 
 
 def _short_name(row, names: list[str]) -> str | None:
@@ -260,12 +348,17 @@ def grade(q: Question, status: str, text: str) -> str:
         return "error"
     says_unknown = any(p in text for p in UNKNOWN_PHRASES)
     if q.expect_unknown:
-        return "correct" if says_unknown or (any(w in text for w in NEGATIVE_WORDS) and ABSENT_ITEM not in
-                                             text.replace(f"有賣{ABSENT_ITEM}", "")) else "wrong"
+        item = q.absent_item or ABSENT_ITEM
+        return "correct" if says_unknown or (any(w in text for w in NEGATIVE_WORDS) and item not in
+                                             text.replace(f"有賣{item}", "")) else "wrong"
     if q.expect_none:
         return "correct" if says_unknown or "沒有" in text else "wrong"
-    if q.number is not None:
-        hit = any(abs(float(n.replace(",", "")) - q.number) < 1e-6 for n in _NUM.findall(text))
+    nums = [float(n.replace(",", "")) for n in _NUM.findall(text)]
+    if q.all_numbers or q.all_of:
+        hit = (all(any(abs(n - x) < 1e-6 for n in nums) for x in q.all_numbers)
+               and all(any(_squash(t) and _squash(t) in _squash(text) for t in group) for group in q.all_of))
+    elif q.number is not None:
+        hit = any(abs(n - q.number) < 1e-6 for n in nums)
         # 銷量 0：「本期沒有賣出任何一件」意思對，但沒有阿拉伯數字 0（2026-10-30 開發集實例）
         hit = hit or (q.number == 0 and not says_unknown and bool(_SOLD_NONE.search(text)))
     else:
@@ -319,7 +412,9 @@ def run_eval(analysis, questions: list[Question], provider, cfg: dict, clock=tim
         seconds = round(clock() - start, 1)
         text = res.text or res.message
         expected = (f"{q.number:g}" if q.number is not None else "沒有／資料沒有" if q.expect_unknown
-                    else "沒有賣出／資料沒有" if q.expect_none else "、".join(q.expected))
+                    else "沒有賣出／資料沒有" if q.expect_none
+                    else "、".join([f"{x:g}" for x in q.all_numbers] + [g[0] for g in q.all_of]) if q.all_numbers or q.all_of
+                    else "、".join(q.expected))
         out.append(Graded(q.kind, q.question, expected, res.status, grade(q, res.status, res.text),
                           grade_strict(q, res.status, res.text), seconds,
                           text + (f"（被擋的數字：{res.reason}）" if res.status == "blocked" else ""),
@@ -456,10 +551,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--demo", action="store_true", help="改用示範賣場（seed 42，和線上 demo 同一份資料）")
     parser.add_argument("--extended", action="store_true",
                         help="另外加上長尾商品題（銷量 31 名以後的商品、用簡稱問），和原本的題目分開計分")
+    parser.add_argument("--handwritten", nargs="?", const="a", choices=sorted(HANDWRITTEN_SETS), default=None,
+                        help="改跑口語題 a（預設）或 b（示範賣場；題目手寫在 eval_sets/，答案由程式算出）")
     parser.add_argument("--mode", choices=("table", "tools"), default=None,
                         help="AI 問答的做法：table（資料表）| tools（工具呼叫）；預設照 config/llm.yaml 的 qa_mode")
     parser.add_argument("--provider", default=None,
                         help="換模型：local:<Hugging Face 模型>[@LoRA 資料夾]、llamacpp:<GGUF 檔名>、openai:<模型>")
+    parser.add_argument("--extra-body", type=json.loads, default=None,
+                        help='openai 的額外參數（JSON），例如 Ollama 關掉 Qwen3 的思考：{"reasoning_effort": "none"}')
+    parser.add_argument("--temperature", type=float, default=None, help="openai 的 temperature（本機模型看 config 的 local）")
     parser.add_argument("--out", type=Path, default=None,
                         help="結果存到哪裡（預設：評估存到賣場資料夾的 qa_eval/，開發集存到系統暫存資料夾）")
     args = parser.parse_args(argv)
@@ -470,7 +570,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
 
     config.load_dotenv()
-    if not args.dev and not args.demo and args.shop not in shops.list_shops():
+    if not args.dev and not args.demo and not args.handwritten and args.shop not in shops.list_shops():
         print(f"找不到賣場「{args.shop}」。目前有：{'、'.join(shops.list_shops())}", file=sys.stderr)
         return 2
     cfg = config.load_yaml("llm")
@@ -479,6 +579,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg = provider_cfg(cfg, args.provider)
     if args.mode:
         cfg = {**cfg, "qa_mode": args.mode}
+    if args.extra_body:
+        cfg = {**cfg, "extra_body": args.extra_body}
+    if args.temperature is not None:
+        cfg = {**cfg, "temperature": args.temperature}
     status = ai_status(cfg)
     if not status.available:
         print(f"AI 目前無法使用：{status.label}（{status.reason}）", file=sys.stderr)
@@ -486,15 +590,17 @@ def main(argv: list[str] | None = None) -> int:
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     if args.dev:
         return _main_dev(args, cfg, args.out or Path(tempfile.gettempdir()) / "shoppilot_qa_dev" / stamp)
-    if args.demo:
-        analysis, shop_name = demo_analysis(), "示範賣場（seed 42）"
+    if args.demo or args.handwritten:
+        analysis = demo_analysis()
+        shop_name = f"示範賣場（seed 42）口語題 {args.handwritten.upper()}" if args.handwritten else "示範賣場（seed 42）"
     else:
         with closing(db.connect(shops.db_path(args.shop))) as conn:
             analysis = Analysis(load_dataset(conn), shops.load_config(args.shop, "keywords"),
                                 shops.load_config(args.shop, "rules"))
         shop_name = args.shop
     try:
-        questions = generate_questions(analysis, args.per_kind)
+        questions = (handwritten_questions(analysis, HANDWRITTEN_SETS[args.handwritten]) if args.handwritten
+                     else generate_questions(analysis, args.per_kind))
     except ValueError as e:
         print(f"無法出題：{e}", file=sys.stderr)
         return 1
@@ -508,9 +614,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{shop_name}：{len(questions)} 題，模型 {provider.model}，做法 {mode}" + (f"，側欄商品 {label}" if label else ""))
     results = run_eval(analysis, questions, provider, cfg, sidebar=sidebar, progress=_progress())
     md = to_markdown(summarize(results), shop_name, provider.model, _period(analysis), label, mode)
-    default_dir = (Path(tempfile.gettempdir()) / "shoppilot_qa_demo" if args.demo else shops.shop_dir(args.shop) / "qa_eval")
+    default_dir = (Path(tempfile.gettempdir()) / "shoppilot_qa_demo" if args.demo or args.handwritten
+                   else shops.shop_dir(args.shop) / "qa_eval")
     out_dir = args.out or default_dir / stamp
-    write_outputs(out_dir, results, md, {"shop": shop_name, "model": provider.model, "mode": mode, "set": "eval",
+    write_outputs(out_dir, results, md, {"shop": shop_name, "model": provider.model, "mode": mode,
+                                         "set": f"handwritten_{args.handwritten}" if args.handwritten else "eval",
                                          "sidebar": label})
     print()
     print(md)

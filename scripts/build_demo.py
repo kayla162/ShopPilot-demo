@@ -3,6 +3,9 @@
 用法（在專案根目錄）：
     python scripts/build_demo.py              # 需要本機模型（config/llm.yaml 的 provider: local），約 10 分鐘
     python scripts/build_demo.py --skip-ai    # 只建資料庫
+    python scripts/build_demo.py --qa-mode tools \
+        --qa-provider llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf@models/shoppilot-tools-lora/shoppilot-tools-lora-f16.gguf
+                                              # 範例問題改用工具呼叫＋LoRA（「AI 分析」照樣用 config/llm.yaml 的模型）
 
 改了分析程式、設定檔、prompt 或模型，預先跑好的答案就對不上快取，要重跑這支程式。
 """
@@ -44,8 +47,10 @@ def _clean(out: Path) -> bool:
     return True
 
 
-def build(out: Path, skip_ai: bool, provider=None, log=print) -> int:
-    """provider：測試用，一個「收到分析、回傳 provider」的函式；預設依 config/llm.yaml 建立。"""
+def build(out: Path, skip_ai: bool, provider=None, log=print, qa_spec: str | None = None,
+          qa_mode: str | None = None, qa_provider=None) -> int:
+    """provider／qa_provider：測試用，「收到分析、回傳 provider」的函式；預設依 config/llm.yaml（和 qa_spec）建立。
+    qa_spec、qa_mode：範例問題用的模型（benchmark 的格式）和做法；線上 demo 會照 examples.json 的紀錄切換。"""
     out = Path(out)
     if not _clean(out):
         log(f"{out} 裡有不是 build_demo 產生的檔案，不清除。請指定空的資料夾或 demo/。")
@@ -74,7 +79,12 @@ def build(out: Path, skip_ai: bool, provider=None, log=print) -> int:
         llm = make_provider(cfg)
     else:
         llm = provider(analysis)
-    result = prewarm.prewarm(analysis, llm, SqliteAICache(db_file), cfg, log=log)
+    qa_cfg = cfg
+    if qa_spec or qa_mode:
+        from shoppilot.llm.benchmark import provider_cfg
+        qa_cfg = {**(provider_cfg(cfg, qa_spec) if qa_spec else cfg), **({"qa_mode": qa_mode} if qa_mode else {})}
+    qa_llm = qa_provider(analysis) if qa_provider else (make_provider(qa_cfg) if qa_cfg is not cfg else llm)
+    result = prewarm.prewarm(analysis, llm, SqliteAICache(db_file), cfg, log=log, qa_provider=qa_llm, qa_cfg=qa_cfg)
     prewarm.write_examples(out / prewarm.EXAMPLES_FILE, result)
     log(f"AI 分析：{len(result.explained)} 個成功，失敗 {result.failed_products}")
     log(f"範例問題：{len(result.questions)} 題，跳過的題型 {result.skipped_kinds}")
@@ -85,8 +95,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="建立線上 demo 的示範資料與預先跑好的 AI")
     parser.add_argument("--out", type=Path, default=ROOT / "demo")
     parser.add_argument("--skip-ai", action="store_true")
+    parser.add_argument("--qa-provider", default=None, help="範例問題用的模型（格式同 qa_eval --provider）")
+    parser.add_argument("--qa-mode", choices=("table", "tools"), default=None, help="範例問題的做法")
     args = parser.parse_args(argv)
-    return build(args.out, args.skip_ai)
+    return build(args.out, args.skip_ai, qa_spec=args.qa_provider, qa_mode=args.qa_mode)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 """量化模型的本機 Provider（llama.cpp，GGUF 格式）：CPU 上比 transformers 的 float32 快好幾倍、記憶體少一半以上。
 
 prompt 一樣用 Hugging Face tokenizer 的 chat template 產生（包含工具說明），所以和 TransformersProvider
-看到的輸入逐字相同，比較時只差在模型權重的精度。只有呼叫 chat()／load() 時才 import llama_cpp、transformers。
+看到的輸入逐字相同，比較時只差在模型權重的精度。lora 指定 GGUF 格式的 LoRA adapter 時，載入量化模型後套上它
+（原本的權重維持量化，LoRA 的部分維持 float16）。只有呼叫 chat()／load() 時才 import llama_cpp、transformers。
 需要另外安裝：pip install -r requirements-local.txt（llama-cpp-python）。
 """
 from __future__ import annotations
@@ -21,11 +22,13 @@ _LOCK = threading.Lock()
 _GEN_LOCK = threading.Lock()
 
 
-def model_label(repo: str, file: str) -> str:
-    """快取鍵和監控紀錄用的名稱，例如 "Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m"。"""
+def model_label(repo: str, file: str, lora: str | None = None) -> str:
+    """快取鍵和監控紀錄用的名稱，例如 "Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m"；
+    套了 LoRA 時加上 "+lora:<檔名>"（例如 "...:q4_k_m+lora:shoppilot-tools-lora-f16"）。"""
     stem = Path(file).stem
     quant = stem.rsplit("-", 1)[-1] if "-" in stem else stem
-    return f"{repo}:{quant}"
+    label = f"{repo}:{quant}"
+    return f"{label}+lora:{Path(str(lora).replace(chr(92), '/')).stem}" if lora else label
 
 
 def unload_all() -> None:
@@ -38,11 +41,13 @@ class LlamaCppProvider:
 
     def __init__(self, repo: str = DEFAULT_REPO, file: str = DEFAULT_FILE, tokenizer: str = DEFAULT_TOKENIZER,
                  path: str | None = None, n_ctx: int = 8192, n_threads: int | None = None, n_gpu_layers: int = 0,
-                 temperature: float = 0.0, max_output_tokens: int = 400, offline: bool = False) -> None:
+                 temperature: float = 0.0, max_output_tokens: int = 400, offline: bool = False,
+                 lora: str | None = None) -> None:
         self.repo, self.file, self.tokenizer, self.path = repo, file, tokenizer, path
+        self.lora = lora or None          # GGUF LoRA adapter（scripts/export_lora_gguf.py 的輸出），載入時套上
         self.n_ctx, self.n_threads, self.n_gpu_layers = int(n_ctx), n_threads, int(n_gpu_layers)
         self.temperature, self.max_output_tokens, self.offline = float(temperature), max_output_tokens, offline
-        self.model = model_label(repo, path or file)
+        self.model = model_label(repo, path or file, self.lora)
 
     def _model_path(self) -> str:
         if self.path:
@@ -57,7 +62,7 @@ class LlamaCppProvider:
             import transformers
         except ImportError as e:
             raise LLMError("llamacpp_not_installed", str(e)) from e
-        key = (self.repo, self.path or self.file, self.n_ctx, self.n_gpu_layers)
+        key = (self.repo, self.path or self.file, self.lora, self.n_ctx, self.n_gpu_layers)
         with _LOCK:
             if key in _LOADED:
                 return _LOADED[key]
@@ -65,7 +70,8 @@ class LlamaCppProvider:
                 tok = transformers.AutoTokenizer.from_pretrained(self.tokenizer, local_files_only=self.offline)
                 llm = llama_cpp.Llama(model_path=self._model_path(), n_ctx=self.n_ctx, verbose=False,
                                       n_threads=self.n_threads or max(1, (os.cpu_count() or 2) // 2),
-                                      n_gpu_layers=self.n_gpu_layers)
+                                      n_gpu_layers=self.n_gpu_layers,
+                                      **({"lora_path": self.lora} if self.lora else {}))
             except MemoryError as e:
                 raise LLMError("out_of_memory", str(e)) from e
             except Exception as e:  # noqa: BLE001 — 檔名錯誤、沒下載、離線、檔案壞掉都算載入失敗

@@ -7,5 +7,7 @@
     "上衣類賣最好的是哪個商品？",
     "街頭 蝴蝶結 羅紋 短款 素面 T恤 的價格是多少？",
     "這家店有賣汽車輪胎嗎？"
-  ]
+  ],
+  "qa_mode": "tools",
+  "qa_model": "Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m+lora:shoppilot-tools-lora-f16"
 }

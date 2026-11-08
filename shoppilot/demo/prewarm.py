@@ -30,6 +30,8 @@ class PrewarmResult:
     failed_products: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     skipped_kinds: list[str] = field(default_factory=list)
+    qa_mode: str = "table"
+    qa_model: str | None = None          # 範例問題是哪個模型答的（和「AI 分析」的模型不同時才有值）
 
 
 class _HoldUntilGraded:
@@ -91,9 +93,12 @@ def _flaw(r, cfg: dict) -> str | None:
     return None
 
 
-def prewarm(analysis, provider, cache, cfg: dict, log=print) -> PrewarmResult:
+def prewarm(analysis, provider, cache, cfg: dict, log=print, qa_provider=None, qa_cfg: dict | None = None) -> PrewarmResult:
+    """qa_provider／qa_cfg：範例問題改用另一個模型和做法（例如工具呼叫＋LoRA 的量化模型）；沒給就和「AI 分析」相同。"""
     picked = pick_products(analysis)
-    result = PrewarmResult(product_id=picked[0])
+    qa_provider, qa_cfg = qa_provider or provider, qa_cfg or cfg
+    result = PrewarmResult(product_id=picked[0], qa_mode=qa_cfg.get("qa_mode", "table"),
+                           qa_model=qa_provider.model if qa_provider.model != provider.model else None)
     for pid in picked:
         pa = analysis.product(pid)
         r = explain_product(pa, pa["default_pool"], provider, cache, cfg)
@@ -107,9 +112,9 @@ def prewarm(analysis, provider, cache, cfg: dict, log=print) -> PrewarmResult:
         chosen = None
         for q in by_kind.get(kind, []):
             # 畫面上點範例問題時固定帶預設商品（問到「這個商品」時側欄選的商品會放進問答的資料表），快取才對得上
-            r = answer_question(analysis, q.question, result.product_id, provider, held, cfg)
+            r = answer_question(analysis, q.question, result.product_id, qa_provider, held, qa_cfg)
             verdict = grade_strict(q, r.status, r.text)
-            flaw = _flaw(r, cfg) if verdict == "correct" else None
+            flaw = _flaw(r, qa_cfg) if verdict == "correct" else None
             held.settle(keep=verdict == "correct" and not flaw)
             log(f"範例問題（{kind}）{q.question}：{r.status}／{verdict}" + (f"，{flaw}，不收" if flaw else ""))
             if verdict == "correct" and not flaw:
@@ -124,6 +129,8 @@ def prewarm(analysis, provider, cache, cfg: dict, log=print) -> PrewarmResult:
 
 def write_examples(path: Path, result: PrewarmResult) -> None:
     data = {"product_id": result.product_id, "questions": result.questions}
+    if result.qa_mode != "table" or result.qa_model:
+        data.update(qa_mode=result.qa_mode, qa_model=result.qa_model)
     Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -134,6 +141,7 @@ def read_examples(path: Path) -> dict | None:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("product_id"), str) \
             or not isinstance(data.get("questions"), list) \
-            or not all(isinstance(q, str) for q in data["questions"]):
+            or not all(isinstance(q, str) for q in data["questions"]) \
+            or not all(isinstance(data.get(k), (str, type(None))) for k in ("qa_mode", "qa_model")):
         return None
     return data

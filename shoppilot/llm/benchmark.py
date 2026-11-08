@@ -57,11 +57,13 @@ SPEC_PROVIDERS = ("openai", "local", "llamacpp")
 def parse_spec(spec: str) -> tuple[str, str]:
     """"local:Qwen/Qwen2.5-0.5B-Instruct" → ("local", "Qwen/Qwen2.5-0.5B-Instruct")。
     llamacpp 寫 GGUF 檔名（從 Qwen 官方的 GGUF repo 下載）或本機路徑，例如 llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf。
-    local 的模型後面可以加 @<LoRA 資料夾>，例如 local:Qwen/Qwen2.5-1.5B-Instruct@models/shoppilot-tools-lora。"""
+    local 的模型後面可以加 @<LoRA 資料夾>，例如 local:Qwen/Qwen2.5-1.5B-Instruct@models/shoppilot-tools-lora；
+    openai 後面可以加 @<API 網址>，換成 OpenAI 相容的服務，例如 openai:qwen3:8b@http://localhost:11434/v1（Ollama）。
+    llamacpp 後面可以加 @<GGUF LoRA 檔>，例如 llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf@models/shoppilot-tools-lora/shoppilot-tools-lora-f16.gguf。"""
     provider, sep, model = spec.partition(":")
     if not sep or provider not in SPEC_PROVIDERS or not model:
         raise ValueError("模型格式要寫成 openai:<模型>、local:<Hugging Face 模型>[@LoRA 資料夾] 或 "
-                         f"llamacpp:<GGUF 檔名或路徑>，收到：{spec}")
+                         f"llamacpp:<GGUF 檔名或路徑>[@GGUF LoRA 檔]，收到：{spec}")
     return provider, model
 
 
@@ -76,9 +78,14 @@ def provider_cfg(base: dict, spec: str) -> dict:
     provider, model = parse_spec(spec)
     cfg = {**base, "enabled": True, "provider": provider}
     if provider == "openai":
-        cfg["model"] = model
+        name, _, base_url = model.partition("@")      # openai:qwen3:8b@http://localhost:11434/v1（OpenAI 相容的服務）
+        cfg["model"] = name
+        if base_url:
+            cfg["base_url"] = base_url
     elif provider == "llamacpp":
         lc = {**(base.get("llamacpp") or {})}
+        model, _, lora = model.partition("@")
+        lc["lora"] = lora or None
         if Path(model).suffix == ".gguf" and (Path(model).exists() or "/" in model or "\\" in model):
             lc.update(path=model)
         else:

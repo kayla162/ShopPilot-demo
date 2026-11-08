@@ -1,4 +1,5 @@
 """公開版的 Streamlit Community Cloud 進入點：展示模式＋只讀快取的 AI，示範資料庫用暫存的複本。"""
+import json
 import os
 import sys
 from pathlib import Path
@@ -16,7 +17,8 @@ DEMO_DB = ROOT / "demo" / "shoppilot.db"
 @pytest.mark.skipif(not DEMO_DB.exists(), reason="沒有 demo/shoppilot.db（先執行 python scripts/build_demo.py）")
 def test_entry_runs_cache_only_demo(monkeypatch):
     # 先用 monkeypatch 設好這些環境變數，進入點改掉的值在測試結束後會還原，不影響其他測試
-    for name in ("SHOPPILOT_DEMO", "SHOPPILOT_LLM_PROVIDER", "SHOPPILOT_DATA_DIR", "SHOPPILOT_REPO_URL"):
+    for name in ("SHOPPILOT_DEMO", "SHOPPILOT_LLM_PROVIDER", "SHOPPILOT_DATA_DIR", "SHOPPILOT_REPO_URL",
+                 "SHOPPILOT_QA_MODE", "SHOPPILOT_CACHE_QA_MODEL"):
         monkeypatch.setenv(name, "")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     before = DEMO_DB.read_bytes()
@@ -28,6 +30,10 @@ def test_entry_runs_cache_only_demo(monkeypatch):
     assert not at.get("file_uploader")
     assert Path(os.environ["SHOPPILOT_DATA_DIR"]) != DEMO_DB.parent
     assert DEMO_DB.read_bytes() == before                    # repo 裡的示範資料不會被改到
+    # 範例問題用工具呼叫＋LoRA 預先跑好時（examples.json 有記錄），問答切成同樣的做法和模型名稱
+    examples = json.loads((DEMO_DB.parent / "examples.json").read_text(encoding="utf-8"))
+    assert os.environ.get("SHOPPILOT_QA_MODE", "") == (examples.get("qa_mode") or "")
+    assert os.environ.get("SHOPPILOT_CACHE_QA_MODEL", "") == (examples.get("qa_model") or "")
 
 
 def _data_dir_after_run(monkeypatch) -> str:

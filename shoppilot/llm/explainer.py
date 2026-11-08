@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Context, Decimal
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 from shoppilot.llm import telemetry
 from shoppilot.llm.base import KIND_LABELS, UNAVAILABLE_MSG, LLMError, LLMProvider, OnToken, complete
@@ -28,6 +29,7 @@ PROVIDERS: dict[str, type] = {"openai": OpenAIProvider, "local": TransformersPro
 # 環境變數可以蓋掉 llm.yaml 的 provider（線上 demo 設成 cache_only）和問答做法，不用改到本機的設定檔
 PROVIDER_ENV = "SHOPPILOT_LLM_PROVIDER"
 QA_MODE_ENV = "SHOPPILOT_QA_MODE"
+CACHE_QA_MODEL_ENV = "SHOPPILOT_CACHE_QA_MODEL"      # 線上 demo：問答的預先答案是哪個模型產生的
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "product_explain.md"
 BLOCKED_MSG = "AI 回覆包含資料中沒有的數字，已停止顯示"
@@ -65,9 +67,11 @@ class AICache(Protocol):
 
 
 def with_env_provider(cfg: dict, env: Mapping[str, str] | None = None) -> dict:
-    """SHOPPILOT_LLM_PROVIDER／SHOPPILOT_QA_MODE 有值時，回傳換掉 provider／qa_mode 的設定副本；都沒有值就回傳原本的設定。"""
+    """SHOPPILOT_LLM_PROVIDER／SHOPPILOT_QA_MODE／SHOPPILOT_CACHE_QA_MODEL 有值時，回傳換掉 provider／qa_mode／
+    cache_qa_model 的設定副本；都沒有值就回傳原本的設定。"""
     env = os.environ if env is None else env
-    override = {k: env.get(name) for k, name in (("provider", PROVIDER_ENV), ("qa_mode", QA_MODE_ENV)) if env.get(name)}
+    names = (("provider", PROVIDER_ENV), ("qa_mode", QA_MODE_ENV), ("cache_qa_model", CACHE_QA_MODEL_ENV))
+    override = {k: env.get(name) for k, name in names if env.get(name)}
     return {**cfg, **override} if override else cfg
 
 
@@ -94,9 +98,15 @@ def ai_status(cfg: dict, env: Mapping[str, str] | None = None,
         return AIStatus(True, "可使用（本機量化模型，按下「AI 分析」才會載入）", make_provider(cfg).model)
     if find_spec("openai") is None:
         return AIStatus(False, "目前未啟用", KIND_LABELS["not_installed"])
-    if not env.get("OPENAI_API_KEY"):
+    base_url = cfg.get("base_url") or env.get("OPENAI_BASE_URL") or ""
+    if not env.get("OPENAI_API_KEY") and not (base_url and is_local_url(base_url)):
         return AIStatus(False, "目前未啟用", KIND_LABELS["no_key"])
     return AIStatus(True, "可使用（按下「AI 分析」才會呼叫）")
+
+
+def is_local_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
 
 
 def make_provider(cfg: dict, env: Mapping[str, str] | None = None) -> LLMProvider | None:
@@ -106,10 +116,16 @@ def make_provider(cfg: dict, env: Mapping[str, str] | None = None) -> LLMProvide
     provider = cfg.get("provider", "none")
     max_output_tokens = int(cfg.get("max_output_tokens", 400))
     if provider == "openai":
-        return OpenAIProvider(model=cfg.get("model", "gpt-4o-mini"), api_key=env.get("OPENAI_API_KEY"),
-                              timeout=float(cfg.get("timeout_seconds", 20)), max_output_tokens=max_output_tokens)
+        base_url = cfg.get("base_url") or env.get("OPENAI_BASE_URL") or None
+        # 本機的 OpenAI 相容服務（例如 Ollama）不檢查 Key，但 openai 套件一定要有一個值
+        key = env.get("OPENAI_API_KEY") or ("local" if base_url and is_local_url(base_url) else None)
+        return OpenAIProvider(model=cfg.get("model", "gpt-4o-mini"), api_key=key,
+                              timeout=float(cfg.get("timeout_seconds", 20)), max_output_tokens=max_output_tokens,
+                              base_url=base_url, temperature=cfg.get("temperature"),
+                              extra_body=cfg.get("extra_body") or None)
     if provider == "cache_only":
-        return CacheOnlyProvider(model=(cfg.get("local") or {}).get("model") or DEFAULT_LOCAL_MODEL)
+        return CacheOnlyProvider(model=(cfg.get("local") or {}).get("model") or DEFAULT_LOCAL_MODEL,
+                                 qa_model=cfg.get("cache_qa_model") or None)
     if provider == "local":
         local = cfg.get("local") or {}
         return TransformersProvider(model=local.get("model") or DEFAULT_LOCAL_MODEL,
@@ -125,7 +141,7 @@ def make_provider(cfg: dict, env: Mapping[str, str] | None = None) -> LLMProvide
                                 path=lc.get("path") or None, n_ctx=int(lc.get("n_ctx", 8192)),
                                 n_threads=lc.get("n_threads") or None, n_gpu_layers=int(lc.get("n_gpu_layers", 0)),
                                 temperature=float(local.get("temperature", 0)), max_output_tokens=max_output_tokens,
-                                offline=bool(local.get("offline", False)))
+                                offline=bool(local.get("offline", False)), lora=lc.get("lora") or None)
     return None
 
 

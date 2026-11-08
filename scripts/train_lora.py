@@ -21,6 +21,7 @@ import math
 import random
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--val", type=float, default=0.1, help="留多少比例算驗證 loss")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--qlora", action="store_true", help="原本的權重用 4-bit 存（QLoRA），省下約 2 GB 顯示卡記憶體")
+    parser.add_argument("--data-version", type=int, choices=finetune.VERSIONS, default=1,
+                        help="訓練資料的版本：1（預設，發布的 adapter）| 2（加一題問兩件事、長名稱）| 3（再加口語、側欄代名詞、類別合計）")
     args = parser.parse_args(argv)
 
     import torch
@@ -84,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     seeds = finetune.TRAIN_SEEDS[:args.seeds]
     analyses = finetune.training_analyses(seeds, [s for s in finetune.NO_SALES_SEEDS if s in seeds])
-    examples = finetune.build_examples(analyses, seed=args.seed)
+    examples = finetune.build_examples(analyses, seed=args.seed, version=args.data_version)
     rows = [json.loads(line) for line in finetune.to_jsonl(examples, load_tools_prompt())]
     (args.out / "train_data.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
                                                encoding="utf-8")
@@ -140,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
 
     log = {"model": args.model, "qlora": args.qlora, "examples": len(rows), "train": len(train), "val": len(val), "steps": steps,
            "rank": args.rank, "lr": args.lr, "epochs": args.epochs, "trainable_params": trainable,
+           "data_version": args.data_version, "kinds": dict(sorted(Counter(r["kind"] for r in rows).items())),
            "val_loss": [], "train_loss": []}
     model.train()                                  # gradient checkpointing 只在訓練模式下作用
     log["val_loss"].append({"step": 0, "loss": evaluate()})

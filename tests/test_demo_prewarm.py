@@ -150,3 +150,25 @@ def test_read_examples_handles_bad_files(tmp_path):
     assert prewarm.read_examples(tmp_path / "bad.json") is None
     (tmp_path / "wrong.json").write_text('{"questions": "x"}', encoding="utf-8")
     assert prewarm.read_examples(tmp_path / "wrong.json") is None
+
+
+def test_examples_record_qa_mode_and_model(tmp_path):
+    result = prewarm.PrewarmResult("p1", questions=["q"], qa_mode="tools", qa_model="m+lora:x")
+    prewarm.write_examples(tmp_path / "e.json", result)
+    assert prewarm.read_examples(tmp_path / "e.json") == {"product_id": "p1", "questions": ["q"],
+                                                          "qa_mode": "tools", "qa_model": "m+lora:x"}
+    prewarm.write_examples(tmp_path / "plain.json", prewarm.PrewarmResult("p1", questions=["q"]))
+    assert "qa_mode" not in prewarm.read_examples(tmp_path / "plain.json")       # 沒換做法時格式和以前一樣
+    (tmp_path / "bad.json").write_text('{"product_id": "p", "questions": [], "qa_model": 3}', encoding="utf-8")
+    assert prewarm.read_examples(tmp_path / "bad.json") is None
+
+
+def test_cache_only_provider_qa_model():
+    from shoppilot.llm.cache_only_provider import CacheOnlyProvider
+    from shoppilot.llm.explainer import make_provider, with_env_provider
+    from shoppilot.llm.qa import qa_model_name
+    cfg = with_env_provider({"enabled": True, "provider": "local"},
+                            env={"SHOPPILOT_LLM_PROVIDER": "cache_only", "SHOPPILOT_CACHE_QA_MODEL": "m+lora:x"})
+    p = make_provider(cfg)
+    assert isinstance(p, CacheOnlyProvider) and qa_model_name(p) == "m+lora:x" and p.model != "m+lora:x"
+    assert qa_model_name(CacheOnlyProvider("base")) == "base"

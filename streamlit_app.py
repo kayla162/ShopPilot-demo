@@ -2,10 +2,12 @@
 
 - 展示模式（SHOPPILOT_DEMO=1）：沒有上傳、刪除、新增賣場。
 - 只讀快取的 AI（SHOPPILOT_LLM_PROVIDER=cache_only）：免費主機跑不動本機模型，只顯示 build_demo.py 預先算好的答案。
+  範例問題是用工具呼叫＋LoRA 產生的時候（examples.json 記了 qa_mode、qa_model），問答切成同樣的做法和模型名稱，快取才對得上。
 - 示範資料庫複製到暫存資料夾再用，不會改到 repo 裡的 demo/；demo/ 的檔案更新（Community Cloud 拉了新的 commit）就重新複製，
   也重新載入 shoppilot、dashboard 的程式。
 - GitHub 連結：在 Community Cloud 的 Secrets 設 SHOPPILOT_REPO_URL = "https://github.com/…"。
 """
+import json
 import os
 import runpy
 import shutil
@@ -54,6 +56,16 @@ def reload_code_if_changed(stamp: tuple) -> None:
     loaded["stamp"] = stamp
 
 
+def qa_settings() -> dict:
+    """examples.json 記錄的範例問題做法和模型（build_demo.py --qa-mode／--qa-provider）；沒有記錄就是空的。"""
+    try:
+        data = json.loads((DEMO / "examples.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if k in ("qa_mode", "qa_model") and isinstance(v, str) and v} \
+        if isinstance(data, dict) else {}
+
+
 def repo_url() -> str:
     try:
         return str(st.secrets.get("SHOPPILOT_REPO_URL", ""))
@@ -63,6 +75,12 @@ def repo_url() -> str:
 
 os.environ["SHOPPILOT_DEMO"] = "1"
 os.environ["SHOPPILOT_LLM_PROVIDER"] = "cache_only"
+for key, env in (("qa_mode", "SHOPPILOT_QA_MODE"), ("qa_model", "SHOPPILOT_CACHE_QA_MODEL")):
+    value = qa_settings().get(key)
+    if value:
+        os.environ[env] = value
+    else:
+        os.environ.pop(env, None)
 stamp = demo_stamp()
 reload_code_if_changed(stamp)
 os.environ["SHOPPILOT_DATA_DIR"] = demo_data_dir(stamp)

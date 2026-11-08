@@ -1,0 +1,49 @@
+# 口語題：示範賣場（seed 42，和線上 demo 同一份資料）。2026-11-08 寫好，在 v2 LoRA 有任何結果之前定稿，之後不改。
+#
+# 和 qa_eval.generate_questions 的模板題不同：問法是賣家平常會打的口語，不套固定句型；商品常只寫名稱的一部分
+# （例如「泡泡袖蕾絲開衫」，商品全名是「簡約 泡泡袖 蕾絲 顯瘦 開衫」），也有一題問兩件事、問整類的合計。
+# 題目文字是手寫的；標準答案由程式從資料算出（type 決定怎麼算），不會因為手算出錯。
+#
+# type：
+#   shop_top / category_top / count / todo     全店銷量最高的商品／類別、商品數、最該先處理的事
+#   top_n（n）                                  銷量前 n 名，回答要全部提到
+#   category_best（category）                    某類別銷量最高的商品
+#   category_units（category）                   某類別本期總銷量（件）
+#   category_count（category）                   某類別有幾個商品
+#   price / units / category_of（product）        商品的價格、本期銷量、類別；product 寫商品全名
+#   price_units（product）                        價格和銷量都要答
+#   best_price / best_units（category，可省略）   （某類別）銷量最高的商品的價格／銷量
+#   has_category（category）/ absent             有沒有賣某類／賣場沒有的東西
+#   sidebar: true                                 在側欄選了 product 之後問的（「這件…」）
+questions:
+  - {q: 這個月哪件賣最好？, type: shop_top}
+  - {q: 最近賣最好的是哪一類？, type: category_top}
+  - {q: 我店裡現在一共有幾個商品？, type: count}
+  - {q: 銷量前三名是哪三件？, type: top_n, n: 3}
+  - {q: 外套賣最好的是哪一件？, type: category_best, category: 外套}
+  - {q: 洋裝類裡面哪件最好賣？, type: category_best, category: 洋裝}
+  - {q: 背心類賣最好的是哪件？, type: category_best, category: 背心}
+  - {q: 短裙裡哪一件賣最好？, type: category_best, category: 短裙}
+  - {q: 配件這期總共賣了幾件？, type: category_units, category: 配件}
+  - {q: 短褲類有幾個商品？, type: category_count, category: 短褲}
+  - {q: 泡泡袖蕾絲開衫現在賣多少？, type: price, product: 簡約 泡泡袖 蕾絲 顯瘦 開衫}
+  - {q: 馬海毛開衫這個月賣了幾件？, type: units, product: 慵懶 馬海毛 開衫}
+  - {q: 波希米亞露背百褶裙是什麼分類？, type: category_of, product: 波希米亞 露背 百褶裙}
+  - {q: 那件水貂毛皺褶長裙多少錢？, type: price, product: 甜辣 皺褶 水貂毛 質感 長裙}
+  - {q: 海軍領修身外套這期有賣出去嗎？賣了幾件？, type: units, product: 街頭 海軍領 修身 外套}
+  - {q: 蕾絲修身舒適帽的價格？, type: price, product: 韓版 美背 蕾絲 修身 舒適 帽}
+  - {q: 緞面垂墜開衫這期賣幾件？, type: units, product: 緞面 垂墜 開衫}
+  - {q: 吊帶鋪棉T恤是哪一類？, type: category_of, product: 復古 吊帶 鋪棉 長袖 素面 T恤}
+  - {q: 文藝打摺長裙的售價跟銷量？, type: price_units, product: 文藝 打摺 坑條 高腰 百搭 長裙}
+  - {q: 那件羅紋彈力蝴蝶結珍珠印花的短裙多少錢？, type: price,
+     product: 羅紋 彈力 蝴蝶結 珍珠 印花 A字 胸墊 滾邊 鏤空 美背 飛袖 慵懶 仙女 休閒 慵懶 甜美 法式 短裙}
+  - {q: 店裡有賣外套嗎？, type: has_category, category: 外套}
+  - {q: 有在賣泳衣嗎？, type: absent, item: 泳衣}
+  - {q: 有賣男生的西裝嗎？, type: absent, item: 西裝}
+  - {q: 我現在最該先處理哪個問題？, type: todo}
+  - {q: 長褲賣最好的那件多少錢？, type: best_price, category: 長褲}
+  - {q: 全店最好賣的那件賣了多少件？, type: best_units}
+  - {q: 上衣類最暢銷的是哪件？它賣多少錢？, type: best_price, category: 上衣}
+  - {q: 這件現在賣多少？, type: price, product: 波希米亞 露背 百褶裙, sidebar: true}
+  - {q: 這款這個月賣得怎樣？賣了幾件？, type: units, product: 波希米亞 露背 百褶裙, sidebar: true}
+  - {q: 這件是放在哪個分類？, type: category_of, product: 波希米亞 露背 百褶裙, sidebar: true}

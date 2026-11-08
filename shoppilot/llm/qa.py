@@ -20,7 +20,7 @@ from shoppilot.llm.explainer import (
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa.md"
 TOOLS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa_tools.md"
 QA_VERSION = "qa6"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
-QA_TOOLS_VERSION = "qt4"    # 工具呼叫的做法：改了 shop_qa_tools.md、工具或迴圈就換版本號
+QA_TOOLS_VERSION = "qt5"    # 工具呼叫的做法：改了 shop_qa_tools.md、工具或迴圈就換版本號
 MODES = ("table", "tools")  # table：每題送一份資料表；tools：模型自己呼叫工具查資料（見 qa_tools.py）
 MAX_QUESTION_LEN = 200
 TOP_SELLERS = 10
@@ -211,6 +211,12 @@ def _product_detail(analysis, pid: str) -> dict | None:
     return detail
 
 
+def qa_model_name(provider) -> str:
+    """問答快取鍵用的模型名稱。線上 demo 的只讀快取 provider 可以另外指定問答的模型（qa_model）：
+    「AI 分析」和「AI 問答」的預先答案可以由不同的模型產生（問答用工具呼叫＋LoRA，見 scripts/build_demo.py）。"""
+    return getattr(provider, "qa_model", None) or provider.model
+
+
 def _cached(cache: AICache, digest: str):
     try:
         cached = cache.get(digest)
@@ -242,7 +248,7 @@ def _answer(analysis, question: str, product_id, provider: LLMProvider | None, c
     call = telemetry.Call("shop_qa", provider, "table", clock=clock)
     ctx = build_qa_context(analysis, question, product_id)
     version = f"{cfg.get('prompt_version', 'v1')}|{QA_VERSION}"
-    digest = input_hash({"context": ctx, "question": question}, provider.model, version)
+    digest = input_hash({"context": ctx, "question": question}, qa_model_name(provider), version)
     cached = _cached(cache, digest)
     if cached:
         call.finish(cache, "cached", tokens_in=cached.get("tokens_in"), tokens_out=cached.get("tokens_out"))
@@ -278,7 +284,8 @@ def _answer_tools(analysis, question: str, product_id, provider, cache: AICache,
     call = telemetry.Call("shop_qa", provider, "tools", clock=clock)
     tools = ShopTools(analysis, product_id)
     version = f"{cfg.get('prompt_version', 'v1')}|{QA_TOOLS_VERSION}"
-    digest = input_hash({"mode": "tools", "question": question, "data": tools.fingerprint()}, provider.model, version)
+    digest = input_hash({"mode": "tools", "question": question, "data": tools.fingerprint()}, qa_model_name(provider),
+                        version)
     cached = _cached(cache, digest)
     if cached:
         call.finish(cache, "cached", tokens_in=cached.get("tokens_in"), tokens_out=cached.get("tokens_out"))
@@ -305,7 +312,7 @@ def _answer_tools(analysis, question: str, product_id, provider, cache: AICache,
         cache.put({"task": "shop_qa", "entity_id": product_id, "input_hash": digest,
                    "input_json": json.dumps({"mode": "tools", "question": question, "tools_used": used,
                                              "messages": run.messages}, ensure_ascii=False, default=str),
-                   "output_text": run.text, "model": provider.model, "prompt_version": version,
+                   "output_text": run.text, "model": qa_model_name(provider), "prompt_version": version,
                    "tokens_in": run.tokens_in, "tokens_out": run.tokens_out})
     except Exception:  # noqa: BLE001
         pass

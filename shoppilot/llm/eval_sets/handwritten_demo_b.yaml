@@ -1,0 +1,37 @@
+# 口語題 B：示範賣場（seed 42）。2026-11-08 寫好，在 v3 LoRA 有任何結果之前定稿，之後不改，也不拿來挑改法。
+#
+# 為什麼有 A、B 兩組：口語題 A（handwritten_demo.yaml）看過 v1、v2 答錯的題目之後，v3 的訓練資料是照那些錯誤改的，
+# A 就不再是沒看過的題目（變成開發集）。B 是之後才寫的最終測試：商品、問法都和 A 不同，只在最後評估時跑一次。
+# 格式和 type 的說明見 handwritten_demo.yaml。
+questions:
+  - {q: 本月冠軍商品是哪一件？, type: shop_top}
+  - {q: 哪個分類的銷量最好？, type: category_top}
+  - {q: 賣場目前有多少件商品在架上？, type: count}
+  - {q: 賣最好的前兩名是哪些？, type: top_n, n: 2}
+  - {q: 長褲裡面哪件最熱銷？, type: category_best, category: 長褲}
+  - {q: 套裝類賣最好的是哪一套？, type: category_best, category: 套裝}
+  - {q: 配件類哪件賣最多？, type: category_best, category: 配件}
+  - {q: 長裙這個月一共賣了幾件？, type: category_units, category: 長裙}
+  - {q: 外套總共有幾款？, type: category_count, category: 外套}
+  - {q: 木耳邊加絨背心賣多少錢？, type: price, product: 木耳邊 加絨 顯瘦 背心}
+  - {q: 皮革長版連身裙這期賣了多少件？, type: units, product: 甜美 皮革 長版 純色 連身裙}
+  - {q: 掛脖兩件套是歸在哪一類？, type: category_of, product: 文藝 掛脖 顯瘦 兩件套}
+  - {q: 平口花呢長褲的價錢是多少？, type: price, product: 慵懶 平口 花呢 長褲}
+  - {q: 綁繩氣質開衫有人買嗎？賣了幾件？, type: units, product: 綁繩 氣質 開衫}
+  - {q: 想問一下絲絨背心多少錢, type: price, product: 法式 絲絨 貼身 純色 背心}
+  - {q: 小香風緞面長褲這期的銷量？, type: units, product: 小香風 緞面 質感 長褲}
+  - {q: 排釦雪紡長裙是什麼類別？, type: category_of, product: 韓版 排釦 雪紡 顯瘦 純色 長裙}
+  - {q: 羊羔毛短褲的價格和銷量是多少？, type: price_units, product: 仙女 羊羔毛 長袖 短褲}
+  - {q: 那件羅紋短袖洞洞抽繩、很長名字的寬管長褲多少錢？, type: price,
+     product: 羅紋 短袖 設計感 洞洞 抽繩 水洗 壓紋 緹花 寬管 撞色 開岔 透膚 街頭 波希米亞 歐美 慵懶 簡約 波希米亞 長褲}
+  - {q: 我們有賣洋裝嗎？, type: has_category, category: 洋裝}
+  - {q: 有沒有在賣運動鞋？, type: absent, item: 運動鞋}
+  - {q: 店裡有手機殼嗎？, type: absent, item: 手機殼}
+  - {q: 現在第一優先要處理什麼？, type: todo}
+  - {q: 洋裝賣最好的那件價格多少？, type: best_price, category: 洋裝}
+  - {q: 短褲類最暢銷的那件賣了幾件？, type: best_units, category: 短褲}
+  - {q: 全店賣最好的是哪件？多少錢？, type: best_price}
+  - {q: 這款多少錢呢？, type: price, product: 甜美 皮革 長版 純色 連身裙, sidebar: true}
+  - {q: 這件這期銷量如何？, type: units, product: 甜美 皮革 長版 純色 連身裙, sidebar: true}
+  - {q: 它是哪個分類的？, type: category_of, product: 甜美 皮革 長版 純色 連身裙, sidebar: true}
+  - {q: 這件的售價跟賣出件數？, type: price_units, product: 甜美 皮革 長版 純色 連身裙, sidebar: true}

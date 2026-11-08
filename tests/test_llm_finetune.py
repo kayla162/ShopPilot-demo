@@ -101,3 +101,22 @@ def test_rng_examples_vary_with_seed():
     rng_a = finetune.shop_examples(next(iter(analyses.values())), random.Random(1))
     rng_b = finetune.shop_examples(next(iter(analyses.values())), random.Random(2))
     assert [e.question for e in rng_a] != [e.question for e in rng_b]
+
+
+def test_every_kind_has_examples():
+    """每個題型都要真的產生得出訓練資料：工具的回傳格式改了、標準答案對不上時，那個題型會整個消失
+    （2026-11-08 實例：「最該先處理的事」讀舊的欄位，v1、v2 的訓練資料都沒有這個題型）。"""
+    analyses = finetune.training_analyses(seeds=(101, 102), no_sales_seeds=())
+    kinds = {e.kind for e in finetune.build_examples(analyses, seed=0, version=3)}
+    expected = {k for k in finetune.PHRASES if not k.startswith("sel_")} | {"sel_price", "sel_units", "sel_cat"}
+    assert expected <= kinds, expected - kinds
+
+
+def test_data_versions_add_kinds():
+    analyses = finetune.training_analyses(seeds=(103,), no_sales_seeds=())
+    k1 = {e.kind for e in finetune.build_examples(analyses, seed=0, version=1)}
+    analyses = finetune.training_analyses(seeds=(103,), no_sales_seeds=())       # v2 會改名稱，要用新的賣場
+    k2 = {e.kind for e in finetune.build_examples(analyses, seed=0, version=2)}
+    assert not k1 & set(finetune.TWO_KINDS) and set(finetune.TWO_KINDS) <= k2 and "top_n" not in k2
+    with pytest.raises(ValueError):
+        finetune.build_examples(analyses, version=4)
