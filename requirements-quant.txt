@@ -1,0 +1,4 @@
+# 選用：量化模型（config/llm.yaml 的 provider: llamacpp，GGUF 格式；CPU 上比 transformers 的 float32 快很多）
+# Windows／macOS／Linux 都有預先編譯好的 CPU 版（不用自己編譯）：
+#   pip install -r requirements-quant.txt --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python>=0.3

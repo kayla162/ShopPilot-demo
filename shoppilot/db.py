@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS ai_insight (
   output_text TEXT, model TEXT, prompt_version TEXT, tokens_in INTEGER, tokens_out INTEGER,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 
+CREATE TABLE IF NOT EXISTS ai_call_log (
+  id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP, task TEXT, provider TEXT, model TEXT,
+  mode TEXT, status TEXT, latency_ms INTEGER, tokens_in INTEGER, tokens_out INTEGER, tool_calls INTEGER,
+  rounds INTEGER, error_kind TEXT);
+
 CREATE VIEW IF NOT EXISTS v_product_price_stock AS
 SELECT snapshot_at, product_id,
        MIN(price) AS price, MAX(price) AS price_max, COUNT(*) AS sku_count,
@@ -79,6 +84,8 @@ PERF_COLUMNS = ["product_id", "product_name", "status", "parent_sku", "sales", "
 SKU_PERF_COLUMNS = ["sku_id", "product_id", "variation_name", "sales", "units", "buyers", "atc_visitors", "atc_units"]
 AI_FIELDS = ["task", "entity_id", "input_hash", "input_json", "output_text", "model", "prompt_version",
              "tokens_in", "tokens_out"]
+AI_CALL_FIELDS = ["task", "provider", "model", "mode", "status", "latency_ms", "tokens_in", "tokens_out", "tool_calls",
+                  "rounds", "error_kind"]
 
 
 def connect(path) -> sqlite3.Connection:
@@ -290,14 +297,28 @@ class SqliteAICache:
 
     def get(self, input_hash: str) -> dict | None:
         with closing(connect(self.path)) as conn:
-            row = conn.execute("SELECT output_text, model, tokens_in, tokens_out, created_at FROM ai_insight "
+            row = conn.execute("SELECT output_text, model, tokens_in, tokens_out, created_at, input_json FROM ai_insight "
                                "WHERE input_hash = ?", (input_hash,)).fetchone()
         if row is None:
             return None
-        return dict(zip(("output_text", "model", "tokens_in", "tokens_out", "created_at"), row))
+        return dict(zip(("output_text", "model", "tokens_in", "tokens_out", "created_at", "input_json"), row))
+
+    def log_call(self, row: dict) -> None:
+        """AI 呼叫紀錄（見 shoppilot/llm/telemetry.py）。"""
+        with closing(connect(self.path)) as conn:
+            with conn:
+                conn.execute(_insert_sql("ai_call_log", AI_CALL_FIELDS), tuple(_py(row.get(f)) for f in AI_CALL_FIELDS))
 
     def put(self, row: dict) -> None:
         with closing(connect(self.path)) as conn:
             with conn:
                 conn.execute(_insert_sql("ai_insight", AI_FIELDS, "INSERT OR REPLACE"),
                              tuple(_py(row.get(f)) for f in AI_FIELDS))
+
+
+def read_ai_calls(conn, days: int | None = None) -> list[dict]:
+    """AI 呼叫紀錄，新的在前面；days 只取最近幾天。"""
+    where = f"WHERE created_at >= datetime('now', '-{int(days)} days')" if days else ""
+    cur = conn.execute(f"SELECT created_at, {', '.join(AI_CALL_FIELDS)} FROM ai_call_log {where} ORDER BY id DESC")
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]

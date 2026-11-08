@@ -37,14 +37,23 @@ def render(ctx: common.Ctx, pa: dict, pool_key: str) -> None:
     elif ctx.llm_cfg.get("provider") == "cache_only":
         st.caption("線上 demo 只提供預先算好的 AI 分析：側欄預設的商品和另外幾個商品已經算好，其他商品請在本機或用 Docker 執行。")
     if clicked:
-        local = ctx.llm_cfg.get("provider") == "local"
+        local = ctx.llm_cfg.get("provider") in ("local", "llamacpp")
+        box = st.empty()
+        streamed: list[str] = []
+
+        def on_token(piece: str) -> None:
+            # 一邊產生一邊顯示；數字檢查要等整段寫完才做，沒通過時會換成擋下的訊息
+            streamed.append(piece)
+            box.markdown(common.md_escape("".join(streamed)) + " ▌")
+
         with st.spinner("本機模型撰寫中…如果有其他人在用會排隊，請稍候（第一次要載入模型，可能需要幾分鐘）" if local else "AI 撰寫中…"):
             try:
                 result = explain_product(pa, pool_key, make_provider(ctx.llm_cfg), SqliteAICache(ctx.db_path),
-                                         ctx.llm_cfg)
+                                         ctx.llm_cfg, on_token=on_token)
             except Exception:  # noqa: BLE001 — AI 設定或快取出錯也只停在這個區塊
                 result = Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
             st.session_state[key] = result
+        box.empty()
     result = st.session_state.get(key)
     if result is None:
         return

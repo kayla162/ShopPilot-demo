@@ -6,6 +6,9 @@
     python -m shoppilot.llm.qa_eval --sidebar           # 每題都帶側欄預設選中的商品（和 Dashboard、線上 demo 一樣）
     python -m shoppilot.llm.qa_eval --dev               # 開發集：挑資料表的改法時用，不含評估的賣場和題目
     python -m shoppilot.llm.qa_eval --dev --no-sales    # 開發集的銷量全部歸零
+    python -m shoppilot.llm.qa_eval --demo              # 示範賣場（seed 42，和線上 demo 同一份資料；任何人都能重跑）
+    python -m shoppilot.llm.qa_eval --mode tools        # AI 問答的做法：table（資料表）| tools（工具呼叫）
+    python -m shoppilot.llm.qa_eval --provider llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf   # 換模型（格式同 benchmark）
 
 每一題的結果分成：
     correct   答對：回答裡有標準答案（貨號、商品名稱、類別、數字）
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 import tempfile
@@ -46,8 +50,10 @@ KIND_LABELS = {"category_top": "賣最好的類別", "shop_top": "銷量最高�
                "category_of": "商品類別", "units": "商品銷量", "has_category": "有沒有賣某類",
                "absent": "資料沒有的事", "selected": "問側欄選的商品", "antecedent": "「它」指題目裡的商品",
                "para_shop": "換句話說：銷量最高的商品", "para_cat": "換句話說：某類別賣最好的商品",
-               "para_cattop": "換句話說：賣最好的類別"}
+               "para_cattop": "換句話說：賣最好的類別", "tail_price": "長尾商品的價格", "tail_units": "長尾商品的銷量",
+               "short_price": "用簡稱問價格"}
 DEV_SEEDS = (1, 2, 3)        # 開發集的示範資料亂數種子；評估用的示範資料是 seed 42
+DEMO_SEED = 42               # 線上 demo 的示範賣場
 # 問側欄選的商品：每個商品一組說法（2026-10-29 補上的說法放第二組）
 SELECTED_PHRASES = [("這個商品的價格是多少？", "這件本期賣了幾件？", "它屬於哪個類別？"),
                     ("這個的價格是多少？", "那個商品本期賣了幾件？", "他屬於哪個類別？")]
@@ -76,6 +82,9 @@ class Graded:
     strict: str                                          # 嚴格評分（見 grade_strict）；和 verdict 並列，不取代
     seconds: float | None
     answer: str
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    tools: str = ""                                      # 工具呼叫的做法：AI 查了哪些資料
 
 
 def _name_tokens(row) -> list[str]:
@@ -152,6 +161,39 @@ def generate_questions(analysis, per_kind: int = 5) -> list[Question]:
     for cat in list(cat_units.index[:2]):
         qs.append(Question("has_category", f"這家店有賣{cat}嗎？", [cat]))
     qs.append(Question("absent", f"這家店有賣{ABSENT_ITEM}嗎？", expect_unknown=True))
+    return qs
+
+
+def _short_name(row, names: list[str]) -> str | None:
+    """商品的簡稱：去掉【品牌】和空白後的前 6 個字，而且只對得到這一個商品（2026-11-08 加入，問法像賣家平常打的）。"""
+    full = _squash(_BRAND.sub("", str(row["core_title"] or "")))
+    short = full[:6]
+    if len(full) < 8 or sum(short in n for n in names) != 1:
+        return None
+    return short
+
+
+def extended_questions(analysis, n: int = 5) -> list[Question]:
+    """長尾商品題（2026-11-08 加入，跑任何結果之前就定好）：原本的商品題只問銷量前 5 名，資料表的銷量排行剛好就有。
+    賣家會問任何商品，也常只打簡稱，所以另外出兩種題目，和原本的題目分開計分：
+    - tail_price／tail_units：銷量排名 31 名以後的商品（不在任何排行裡），用貨號或完整名稱問價格、銷量
+    - short_price：用簡稱（前 6 個字）問銷量前 30 名商品的價格"""
+    reg = analysis.regular()
+    by_units = reg.sort_values(["units", "impressions"], ascending=False)
+    tail = by_units.iloc[30:]
+    tail = tail.iloc[::max(1, len(tail) // n)].head(n) if len(tail) else tail
+    qs: list[Question] = []
+    for _, r in tail.iterrows():
+        label = _label(r)
+        qs.append(Question("tail_price", f"{label} 的價格是多少？", number=float(r["price"]), product_id=r["product_id"]))
+        qs.append(Question("tail_units", f"{label} 本期賣了幾件？", number=float(r["units"]), product_id=r["product_id"]))
+    names = [_squash(_BRAND.sub("", str(t or ""))) for t in reg["core_title"]]
+    picked = 0
+    for _, r in by_units.head(30).iterrows():
+        short = _short_name(r, names)
+        if short and picked < n:
+            qs.append(Question("short_price", f"{short} 多少錢？", number=float(r["price"]), product_id=r["product_id"]))
+            picked += 1
     return qs
 
 
@@ -280,7 +322,8 @@ def run_eval(analysis, questions: list[Question], provider, cfg: dict, clock=tim
                     else "沒有賣出／資料沒有" if q.expect_none else "、".join(q.expected))
         out.append(Graded(q.kind, q.question, expected, res.status, grade(q, res.status, res.text),
                           grade_strict(q, res.status, res.text), seconds,
-                          text + (f"（被擋的數字：{res.reason}）" if res.status == "blocked" else "")))
+                          text + (f"（被擋的數字：{res.reason}）" if res.status == "blocked" else ""),
+                          res.tokens_in, res.tokens_out, "、".join(res.tools_used)))
         if progress:
             progress(i, len(questions), out[-1])
     return out
@@ -296,17 +339,22 @@ def summarize(results: list[Graded]) -> dict:
         k[1] += 1
         k[2] += r.strict == "correct"
     times = [r.seconds for r in results if r.seconds is not None]
+    tin = [r.tokens_in for r in results if r.tokens_in]
+    tout = [r.tokens_out for r in results if r.tokens_out]
     return {"total": total, **count, "strict": sum(r.strict == "correct" for r in results),
             "accuracy": count["correct"] / total if total else None,
-            "avg_seconds": sum(times) / len(times) if times else None, "by_kind": kinds}
+            "avg_seconds": sum(times) / len(times) if times else None, "by_kind": kinds,
+            "avg_tokens_in": sum(tin) / len(tin) if tin else None, "avg_tokens_out": sum(tout) / len(tout) if tout else None}
 
 
-def to_markdown(s: dict, shop: str, model: str, period: str, sidebar: str | None = None) -> str:
+def to_markdown(s: dict, shop: str, model: str, period: str, sidebar: str | None = None, mode: str = "table") -> str:
     pct = lambda n: f"{n / s['total']:.0%}" if s["total"] else "—"  # noqa: E731
+    tokens = (f"，平均輸入 {s['avg_tokens_in']:.0f} tokens" if s.get("avg_tokens_in") else "")
     lines = [
         f"# AI 問答評估：{shop}（{datetime.now():%Y-%m-%d %H:%M}）", "",
-        f"- 模型：{model}", f"- 資料期間：{period}", f"- 側欄商品：{f'{sidebar}（每題都帶）' if sidebar else '不帶'}",
-        f"- 題數：{s['total']}，平均每題 {s['avg_seconds'] or 0:.0f} 秒", "",
+        f"- 模型：{model}", f"- 做法：{'工具呼叫' if mode == 'tools' else '資料表'}（{mode}）",
+        f"- 資料期間：{period}", f"- 側欄商品：{f'{sidebar}（每題都帶）' if sidebar else '不帶'}",
+        f"- 題數：{s['total']}，平均每題 {s['avg_seconds'] or 0:.1f} 秒{tokens}", "",
         "| 結果 | 題數 | 比例 |", "|---|---|---|",
         f"| 答對 | {s['correct']} | {pct(s['correct'])} |",
         f"| 答對（嚴格評分） | {s['strict']} | {pct(s['strict'])} |",
@@ -323,9 +371,12 @@ def to_markdown(s: dict, shop: str, model: str, period: str, sidebar: str | None
     return "\n".join(lines) + "\n"
 
 
-def write_outputs(out_dir: Path, results: list[Graded], md: str) -> None:
+def write_outputs(out_dir: Path, results: list[Graded], md: str, meta: dict | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.md").write_text(md, encoding="utf-8")
+    s = summarize(results)
+    (out_dir / "summary.json").write_text(json.dumps({**(meta or {}), **{k: v for k, v in s.items()}},
+                                                     ensure_ascii=False, indent=2), encoding="utf-8")
     with (out_dir / "details.csv").open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(Graded.__dataclass_fields__))
         writer.writeheader()
@@ -362,21 +413,31 @@ def _main_dev(args, cfg: dict, out_dir: Path) -> int:
         label = _label(an.products.set_index("product_id").loc[sidebar]) if sidebar else None
         results = run_eval(an, questions[name], provider, cfg, sidebar=sidebar, progress=_progress(f"{name} "))
         s = summarize(results)
-        write_outputs(out_dir / name, results, to_markdown(s, f"{title} {name}", provider.model, _period(an), label))
+        mode = cfg.get("qa_mode", "table")
+        write_outputs(out_dir / name, results, to_markdown(s, f"{title} {name}", provider.model, _period(an), label, mode),
+                      {"shop": name, "model": provider.model, "mode": mode, "set": "dev"})
         everything += results
         rows.append(f"| {name} | {s['correct']}/{s['total']} | {s['strict']}/{s['total']} |")
     first = next(iter(analyses.values()))
     md = to_markdown(summarize(everything), title, provider.model, _period(first),
-                     "各賣場側欄預設選中的商品" if args.sidebar else None)
+                     "各賣場側欄預設選中的商品" if args.sidebar else None, cfg.get("qa_mode", "table"))
     md += "\n".join(["", "| 賣場 | 答對 | 嚴格評分 |", "|---|---|---|", *rows, "",
                      "開發集只拿來挑改法：賣場是示範資料換亂數種子產生的（評估的示範資料是 seed 42），也不含評估的題目。"
                      "每題的原文見各賣場資料夾的 details.csv。"]) + "\n"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.md").write_text(md, encoding="utf-8")
+    (out_dir / "summary.json").write_text(json.dumps({"set": "dev", "model": provider.model,
+                                                      "mode": cfg.get("qa_mode", "table"), **summarize(everything)},
+                                                     ensure_ascii=False, indent=2), encoding="utf-8")
     print()
     print(md)
     print(f"結果已存到 {out_dir}")
     return 0
+
+
+def demo_analysis():
+    """示範賣場（seed 42）：和線上 demo 同一份資料，任何人 clone 下來都能重跑同樣的評估。"""
+    return dev_analyses(seeds=(DEMO_SEED,))[f"seed {DEMO_SEED}"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -392,6 +453,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dev", action="store_true",
                         help="改跑開發集：示範資料換亂數種子 1、2、3 產生的賣場（挑改法用，不含評估的賣場和題目）")
     parser.add_argument("--no-sales", action="store_true", help="開發集的銷量全部歸零（要和 --dev 一起用）")
+    parser.add_argument("--demo", action="store_true", help="改用示範賣場（seed 42，和線上 demo 同一份資料）")
+    parser.add_argument("--extended", action="store_true",
+                        help="另外加上長尾商品題（銷量 31 名以後的商品、用簡稱問），和原本的題目分開計分")
+    parser.add_argument("--mode", choices=("table", "tools"), default=None,
+                        help="AI 問答的做法：table（資料表）| tools（工具呼叫）；預設照 config/llm.yaml 的 qa_mode")
+    parser.add_argument("--provider", default=None,
+                        help="換模型：local:<Hugging Face 模型>[@LoRA 資料夾]、llamacpp:<GGUF 檔名>、openai:<模型>")
     parser.add_argument("--out", type=Path, default=None,
                         help="結果存到哪裡（預設：評估存到賣場資料夾的 qa_eval/，開發集存到系統暫存資料夾）")
     args = parser.parse_args(argv)
@@ -402,10 +470,15 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
 
     config.load_dotenv()
-    if not args.dev and args.shop not in shops.list_shops():
+    if not args.dev and not args.demo and args.shop not in shops.list_shops():
         print(f"找不到賣場「{args.shop}」。目前有：{'、'.join(shops.list_shops())}", file=sys.stderr)
         return 2
     cfg = config.load_yaml("llm")
+    if args.provider:
+        from shoppilot.llm.benchmark import provider_cfg
+        cfg = provider_cfg(cfg, args.provider)
+    if args.mode:
+        cfg = {**cfg, "qa_mode": args.mode}
     status = ai_status(cfg)
     if not status.available:
         print(f"AI 目前無法使用：{status.label}（{status.reason}）", file=sys.stderr)
@@ -413,23 +486,32 @@ def main(argv: list[str] | None = None) -> int:
     stamp = f"{datetime.now():%Y%m%d-%H%M%S}"
     if args.dev:
         return _main_dev(args, cfg, args.out or Path(tempfile.gettempdir()) / "shoppilot_qa_dev" / stamp)
-    with closing(db.connect(shops.db_path(args.shop))) as conn:
-        analysis = Analysis(load_dataset(conn), shops.load_config(args.shop, "keywords"),
-                            shops.load_config(args.shop, "rules"))
+    if args.demo:
+        analysis, shop_name = demo_analysis(), "示範賣場（seed 42）"
+    else:
+        with closing(db.connect(shops.db_path(args.shop))) as conn:
+            analysis = Analysis(load_dataset(conn), shops.load_config(args.shop, "keywords"),
+                                shops.load_config(args.shop, "rules"))
+        shop_name = args.shop
     try:
         questions = generate_questions(analysis, args.per_kind)
     except ValueError as e:
         print(f"無法出題：{e}", file=sys.stderr)
         return 1
+    if args.extended:
+        questions += extended_questions(analysis)
     questions = questions[:args.limit] if args.limit else questions
     provider = _load_provider(cfg)
     sidebar = sidebar_product(analysis) if args.sidebar else None
     label = _label(analysis.products.set_index("product_id").loc[sidebar]) if sidebar else None
-    print(f"{args.shop}：{len(questions)} 題，模型 {provider.model}" + (f"，側欄商品 {label}" if label else ""))
+    mode = cfg.get("qa_mode", "table")
+    print(f"{shop_name}：{len(questions)} 題，模型 {provider.model}，做法 {mode}" + (f"，側欄商品 {label}" if label else ""))
     results = run_eval(analysis, questions, provider, cfg, sidebar=sidebar, progress=_progress())
-    md = to_markdown(summarize(results), args.shop, provider.model, _period(analysis), label)
-    out_dir = args.out or shops.shop_dir(args.shop) / "qa_eval" / stamp
-    write_outputs(out_dir, results, md)
+    md = to_markdown(summarize(results), shop_name, provider.model, _period(analysis), label, mode)
+    default_dir = (Path(tempfile.gettempdir()) / "shoppilot_qa_demo" if args.demo else shops.shop_dir(args.shop) / "qa_eval")
+    out_dir = args.out or default_dir / stamp
+    write_outputs(out_dir, results, md, {"shop": shop_name, "model": provider.model, "mode": mode, "set": "eval",
+                                         "sidebar": label})
     print()
     print(md)
     print(f"結果已存到 {out_dir}")

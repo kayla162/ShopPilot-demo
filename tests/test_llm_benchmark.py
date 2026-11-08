@@ -55,9 +55,23 @@ def test_provider_cfg_keeps_other_settings():
     base = {"enabled": False, "provider": "openai", "model": "gpt-4o-mini", "max_output_tokens": 300,
             "local": {"model": "a", "device": "cpu"}}
     local = benchmark.provider_cfg(base, "local:b")
-    assert local["enabled"] and local["provider"] == "local" and local["local"] == {"model": "b", "device": "cpu"}
+    assert local["enabled"] and local["provider"] == "local"
+    assert local["local"] == {"model": "b", "device": "cpu", "adapter": None}
     assert local["max_output_tokens"] == 300 and base["local"]["model"] == "a"     # 不改到原設定
     assert benchmark.provider_cfg(base, "openai:gpt-x")["model"] == "gpt-x"
+
+
+def test_provider_cfg_lora_and_llamacpp():
+    base = {"local": {"model": "a", "device": "cpu"}, "llamacpp": {"n_ctx": 4096}}
+    lora = benchmark.provider_cfg(base, "local:Qwen/Q@models/lora")["local"]
+    assert lora["model"] == "Qwen/Q" and lora["adapter"] == "models/lora"
+    gguf = benchmark.provider_cfg(base, "llamacpp:qwen2.5-0.5b-instruct-q8_0.gguf")
+    assert gguf["provider"] == "llamacpp" and gguf["llamacpp"]["n_ctx"] == 4096
+    assert gguf["llamacpp"]["file"] == "qwen2.5-0.5b-instruct-q8_0.gguf"
+    assert gguf["llamacpp"]["repo"] == "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+    assert benchmark.provider_cfg(base, "llamacpp:C:/models/x-q4_k_m.gguf")["llamacpp"]["path"] == "C:/models/x-q4_k_m.gguf"
+    with pytest.raises(ValueError):
+        benchmark.parse_spec("vllm:x")
 
 
 def test_run_provider_classifies_results():
@@ -86,8 +100,8 @@ def test_summarize_and_markdown():
     assert (g["answered"], g["blocked_rate"], g["errors"]) == (1, 0.0, "API Key 無效或沒有權限")
     assert g["cost_usd"] == pytest.approx((200 * 0.15 + 60 * 0.60) / 1e6)
     md = benchmark.to_markdown(rows, 2, "CPU")
-    assert "| Qwen/x | 2/2 | 50% | 100% | 2.0 | 60 | 0.0000 | 3.0 GB | 30 |" in md
-    assert "| gpt | 1/2 | 0% | 100% | 1.0 | 60 | 0.0001 | — | — |" in md
+    assert "| Qwen/x | 2/2 | 50% | 100% | 2.0 | 30.0 | 60 | 0.0000 | 3.0 GB | 30 |" in md
+    assert "| gpt | 1/2 | 0% | 100% | 1.0 | 60.0 | 60 | 0.0001 | — | — |" in md
     assert "gpt：API Key 無效或沒有權限" in md
 
 

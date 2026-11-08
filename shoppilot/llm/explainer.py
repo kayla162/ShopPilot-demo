@@ -13,8 +13,10 @@ from decimal import ROUND_HALF_UP, Context, Decimal
 from pathlib import Path
 from typing import Protocol
 
-from shoppilot.llm.base import KIND_LABELS, UNAVAILABLE_MSG, LLMError, LLMProvider
+from shoppilot.llm import telemetry
+from shoppilot.llm.base import KIND_LABELS, UNAVAILABLE_MSG, LLMError, LLMProvider, OnToken, complete
 from shoppilot.llm.cache_only_provider import CacheOnlyProvider
+from shoppilot.llm.llamacpp_provider import LlamaCppProvider
 from shoppilot.llm.local_provider import DEFAULT_MODEL as DEFAULT_LOCAL_MODEL
 from shoppilot.llm.local_provider import TransformersProvider
 from shoppilot.llm.openai_provider import OpenAIProvider
@@ -22,9 +24,10 @@ from shoppilot.llm.openai_provider import OpenAIProvider
 # 新增 provider 時，除了實作同一個 LLMProvider 介面、登記在這裡，還要在 ai_status 加上它自己的
 # 可用性檢查，並在 make_provider 加上它自己的建立方式。
 PROVIDERS: dict[str, type] = {"openai": OpenAIProvider, "local": TransformersProvider,
-                              "cache_only": CacheOnlyProvider}
-# 環境變數可以蓋掉 llm.yaml 的 provider（線上 demo 設成 cache_only），不用改到本機的設定檔
+                              "llamacpp": LlamaCppProvider, "cache_only": CacheOnlyProvider}
+# 環境變數可以蓋掉 llm.yaml 的 provider（線上 demo 設成 cache_only）和問答做法，不用改到本機的設定檔
 PROVIDER_ENV = "SHOPPILOT_LLM_PROVIDER"
+QA_MODE_ENV = "SHOPPILOT_QA_MODE"
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "product_explain.md"
 BLOCKED_MSG = "AI 回覆包含資料中沒有的數字，已停止顯示"
@@ -53,6 +56,7 @@ class Explanation:
     reason: str = ""
     tokens_in: int | None = None
     tokens_out: int | None = None
+    tools_used: tuple[str, ...] = ()     # 工具呼叫的做法：AI 查了哪些資料（畫面上顯示）
 
 
 class AICache(Protocol):
@@ -61,10 +65,10 @@ class AICache(Protocol):
 
 
 def with_env_provider(cfg: dict, env: Mapping[str, str] | None = None) -> dict:
-    """SHOPPILOT_LLM_PROVIDER 有值時，回傳 provider 換成它的設定副本；沒有值就回傳原本的設定。"""
+    """SHOPPILOT_LLM_PROVIDER／SHOPPILOT_QA_MODE 有值時，回傳換掉 provider／qa_mode 的設定副本；都沒有值就回傳原本的設定。"""
     env = os.environ if env is None else env
-    override = env.get(PROVIDER_ENV)
-    return {**cfg, "provider": override} if override else cfg
+    override = {k: env.get(name) for k, name in (("provider", PROVIDER_ENV), ("qa_mode", QA_MODE_ENV)) if env.get(name)}
+    return {**cfg, **override} if override else cfg
 
 
 def ai_status(cfg: dict, env: Mapping[str, str] | None = None,
@@ -84,6 +88,10 @@ def ai_status(cfg: dict, env: Mapping[str, str] | None = None,
             return AIStatus(False, "目前未啟用", KIND_LABELS["local_not_installed"])
         model = (cfg.get("local") or {}).get("model") or DEFAULT_LOCAL_MODEL
         return AIStatus(True, "可使用（本機模型，按下「AI 分析」才會載入）", model)
+    if provider == "llamacpp":
+        if find_spec("llama_cpp") is None or find_spec("transformers") is None:
+            return AIStatus(False, "目前未啟用", KIND_LABELS["llamacpp_not_installed"])
+        return AIStatus(True, "可使用（本機量化模型，按下「AI 分析」才會載入）", make_provider(cfg).model)
     if find_spec("openai") is None:
         return AIStatus(False, "目前未啟用", KIND_LABELS["not_installed"])
     if not env.get("OPENAI_API_KEY"):
@@ -107,7 +115,17 @@ def make_provider(cfg: dict, env: Mapping[str, str] | None = None) -> LLMProvide
         return TransformersProvider(model=local.get("model") or DEFAULT_LOCAL_MODEL,
                                     device=str(local.get("device", "auto")), dtype=str(local.get("dtype", "auto")),
                                     temperature=float(local.get("temperature", 0)),
-                                    max_output_tokens=max_output_tokens, offline=bool(local.get("offline", False)))
+                                    max_output_tokens=max_output_tokens, offline=bool(local.get("offline", False)),
+                                    adapter=local.get("adapter") or None)
+    if provider == "llamacpp":
+        lc, local = cfg.get("llamacpp") or {}, cfg.get("local") or {}
+        return LlamaCppProvider(repo=lc.get("repo") or "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+                                file=lc.get("file") or "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+                                tokenizer=lc.get("tokenizer") or local.get("model") or DEFAULT_LOCAL_MODEL,
+                                path=lc.get("path") or None, n_ctx=int(lc.get("n_ctx", 8192)),
+                                n_threads=lc.get("n_threads") or None, n_gpu_layers=int(lc.get("n_gpu_layers", 0)),
+                                temperature=float(local.get("temperature", 0)), max_output_tokens=max_output_tokens,
+                                offline=bool(local.get("offline", False)))
     return None
 
 
@@ -218,12 +236,14 @@ def load_system_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def _explain(pa: dict, pool_key: str, provider: LLMProvider | None, cache: AICache, cfg: dict) -> Explanation:
+def _explain(pa: dict, pool_key: str, provider: LLMProvider | None, cache: AICache, cfg: dict,
+             on_token: OnToken | None = None, clock=telemetry.now) -> Explanation:
     if provider is None:
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason="AI 文字解釋目前未啟用")
     ai_input = build_ai_input(pa, pool_key)
     version = str(cfg.get("prompt_version", "v1"))
     digest = input_hash(ai_input, provider.model, version)
+    call = telemetry.Call("product_explain", provider, clock=clock)
     try:
         cached = cache.get(digest)
     except Exception:  # noqa: BLE001 — 快取壞掉就當作沒有快取
@@ -231,17 +251,21 @@ def _explain(pa: dict, pool_key: str, provider: LLMProvider | None, cache: AICac
     # 紀錄壞掉（沒有可用的 output_text）也當作沒有快取：重新呼叫，寫回時會蓋掉壞紀錄，不會每次按都失敗。
     text = cached.get("output_text") if isinstance(cached, Mapping) else None
     if isinstance(text, str) and text.strip():
+        call.finish(cache, "cached", tokens_in=cached.get("tokens_in"), tokens_out=cached.get("tokens_out"))
         return Explanation("cached", text=text, tokens_in=cached.get("tokens_in"),
                            tokens_out=cached.get("tokens_out"))
     user = json.dumps(ai_input, ensure_ascii=False, indent=2)
     try:
-        reply = provider.generate(load_system_prompt(), user)
+        reply = complete(provider, load_system_prompt(), user, on_token)
     except LLMError as e:
+        call.finish(cache, "error", error_kind=e.kind)
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS.get(e.kind, KIND_LABELS["unknown"]))
     except Exception:  # noqa: BLE001 — AI 的任何錯誤都不可以影響核心分析
+        call.finish(cache, "error", error_kind="unknown")
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
     bad = find_unsupported_numbers(reply.text, ai_input)
     if bad:
+        call.finish(cache, "blocked", tokens_in=reply.tokens_in, tokens_out=reply.tokens_out)
         return Explanation("blocked", message=BLOCKED_MSG, reason="、".join(bad))
     try:
         cache.put({"task": "product_explain", "entity_id": pa.get("product", {}).get("id"), "input_hash": digest,
@@ -249,12 +273,15 @@ def _explain(pa: dict, pool_key: str, provider: LLMProvider | None, cache: AICac
                    "tokens_in": reply.tokens_in, "tokens_out": reply.tokens_out})
     except Exception:  # noqa: BLE001
         pass
+    call.finish(cache, "ok", tokens_in=reply.tokens_in, tokens_out=reply.tokens_out)
     return Explanation("ok", text=reply.text, tokens_in=reply.tokens_in, tokens_out=reply.tokens_out)
 
 
-def explain_product(pa: dict, pool_key: str, provider: LLMProvider | None, cache: AICache, cfg: dict) -> Explanation:
-    """不丟例外：任何錯誤都只回傳固定訊息，不把例外文字放進結果（SDK 的錯誤文字可能含 Key 的片段）。"""
+def explain_product(pa: dict, pool_key: str, provider: LLMProvider | None, cache: AICache, cfg: dict,
+                    on_token: OnToken | None = None) -> Explanation:
+    """不丟例外：任何錯誤都只回傳固定訊息，不把例外文字放進結果（SDK 的錯誤文字可能含 Key 的片段）。
+    on_token：串流顯示用，每產生一段文字就呼叫一次（數字檢查要等整段寫完才做，沒通過時畫面會換成擋下的訊息）。"""
     try:
-        return _explain(pa, pool_key, provider, cache, cfg)
+        return _explain(pa, pool_key, provider, cache, cfg, on_token)
     except Exception:  # noqa: BLE001 — 最後一道防線：AI 解說的任何錯誤都不可以影響核心分析
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])

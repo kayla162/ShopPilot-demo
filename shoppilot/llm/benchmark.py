@@ -14,6 +14,7 @@ import csv
 import json
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterable
 from contextlib import closing
@@ -50,12 +51,24 @@ def format_ok(text: str) -> bool:
     return 3 <= len(sentences) <= 5 and not _MARKDOWN.search(text)
 
 
+SPEC_PROVIDERS = ("openai", "local", "llamacpp")
+
+
 def parse_spec(spec: str) -> tuple[str, str]:
-    """"local:Qwen/Qwen2.5-0.5B-Instruct" → ("local", "Qwen/Qwen2.5-0.5B-Instruct")。"""
+    """"local:Qwen/Qwen2.5-0.5B-Instruct" → ("local", "Qwen/Qwen2.5-0.5B-Instruct")。
+    llamacpp 寫 GGUF 檔名（從 Qwen 官方的 GGUF repo 下載）或本機路徑，例如 llamacpp:qwen2.5-1.5b-instruct-q4_k_m.gguf。
+    local 的模型後面可以加 @<LoRA 資料夾>，例如 local:Qwen/Qwen2.5-1.5B-Instruct@models/shoppilot-tools-lora。"""
     provider, sep, model = spec.partition(":")
-    if not sep or provider not in ("openai", "local") or not model:
-        raise ValueError(f"模型格式要寫成 openai:<模型> 或 local:<Hugging Face 模型>，收到：{spec}")
+    if not sep or provider not in SPEC_PROVIDERS or not model:
+        raise ValueError("模型格式要寫成 openai:<模型>、local:<Hugging Face 模型>[@LoRA 資料夾] 或 "
+                         f"llamacpp:<GGUF 檔名或路徑>，收到：{spec}")
     return provider, model
+
+
+def _gguf_repo(file: str) -> str:
+    """qwen2.5-1.5b-instruct-q4_k_m.gguf → Qwen/Qwen2.5-1.5B-Instruct-GGUF（Qwen 官方的命名方式）。"""
+    size = file.split("-")[1].upper() if file.count("-") >= 2 else "1.5B"
+    return f"Qwen/Qwen2.5-{size}-Instruct-GGUF"
 
 
 def provider_cfg(base: dict, spec: str) -> dict:
@@ -64,8 +77,16 @@ def provider_cfg(base: dict, spec: str) -> dict:
     cfg = {**base, "enabled": True, "provider": provider}
     if provider == "openai":
         cfg["model"] = model
+    elif provider == "llamacpp":
+        lc = {**(base.get("llamacpp") or {})}
+        if Path(model).suffix == ".gguf" and (Path(model).exists() or "/" in model or "\\" in model):
+            lc.update(path=model)
+        else:
+            lc.update(file=model, repo=_gguf_repo(model), path=None)
+        cfg["llamacpp"] = lc
     else:
-        cfg["local"] = {**(base.get("local") or {}), "model": model}
+        name, _, adapter = model.partition("@")
+        cfg["local"] = {**(base.get("local") or {}), "model": name, "adapter": adapter or None}
     return cfg
 
 
@@ -116,6 +137,9 @@ def summarize(results: list[CallResult], load_seconds: dict[str, float | None],
             "format_rate": (sum(bool(r.format_ok) for r in answered) / len(answered)) if answered else None,
             "avg_seconds": _avg([r.seconds for r in answered if r.seconds is not None]),
             "avg_tokens_out": _avg([r.tokens_out for r in answered if r.tokens_out is not None]),
+            "tokens_per_second": (sum(r.tokens_out for r in answered if r.tokens_out and r.seconds)
+                                  / sum(r.seconds for r in answered if r.tokens_out and r.seconds))
+            if any(r.tokens_out and r.seconds for r in answered) else None,
             "cost_usd": cost if is_openai else 0.0,
             "memory_gb": memory.get(model) / 1024 ** 3 if memory.get(model) else None,
             "load_seconds": load_seconds.get(model),
@@ -132,13 +156,14 @@ def to_markdown(rows: list[dict], n_products: int, device_note: str) -> str:
     lines = [
         f"# AI 模型比較（{n_products} 個商品，{datetime.now():%Y-%m-%d %H:%M}）",
         "",
-        "| 模型 | 成功回覆 | 數字捏造率 | 格式符合率 | 平均回應秒數 | 平均輸出 tokens | 估計成本（美元） | 模型權重記憶體 | 載入秒數 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| 模型 | 成功回覆 | 數字捏造率 | 格式符合率 | 平均回應秒數 | 輸出速度（tokens/秒） | 平均輸出 tokens | 估計成本（美元） | 模型權重記憶體 | 載入秒數 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         lines.append("| " + " | ".join([
             r["model"], f"{r['answered']}/{r['calls']}", _fmt(r["blocked_rate"], "{:.0%}"),
-            _fmt(r["format_rate"], "{:.0%}"), _fmt(r["avg_seconds"], "{:.1f}"), _fmt(r["avg_tokens_out"], "{:.0f}"),
+            _fmt(r["format_rate"], "{:.0%}"), _fmt(r["avg_seconds"], "{:.1f}"), _fmt(r.get("tokens_per_second"), "{:.1f}"),
+            _fmt(r["avg_tokens_out"], "{:.0f}"),
             _fmt(r["cost_usd"], "{:.4f}"), _fmt(r["memory_gb"], "{:.1f} GB"), _fmt(r["load_seconds"], "{:.0f}"),
         ]) + " |")
     lines += [
@@ -146,7 +171,7 @@ def to_markdown(rows: list[dict], n_products: int, device_note: str) -> str:
         "- **數字捏造率**：成功回覆中，寫出輸入資料裡沒有的數字、會被 Dashboard 擋下不顯示的比例（越低越好）。",
         "- **格式符合率**：符合 prompt 要求（3 到 5 句、不條列、不用 Markdown）的比例。",
         "- **估計成本**：只算 OpenAI，依每 100 萬 tokens 的單價估算；本機模型不計電費，記為 0。",
-        "- **模型權重記憶體**：參數數量 × 每個參數的位元組，不含執行時的額外用量。",
+        "- **模型權重記憶體**：參數數量 × 每個參數的位元組（量化模型是 GGUF 檔的大小），不含執行時的額外用量。",
         "- **載入秒數**：模型第一次執行時包含從 Hugging Face 下載的時間；之後只是從硬碟載入。",
         f"- **執行環境**：{device_note}",
     ]
@@ -194,6 +219,7 @@ def _device_note() -> str:
 def main(argv: list[str] | None = None) -> int:
     from shoppilot import config, db, shops
     from shoppilot.analytics.report import Analysis, load_dataset
+    from shoppilot.llm.llamacpp_provider import unload_all as unload_llamacpp
     from shoppilot.llm.local_provider import unload_all
 
     parser = argparse.ArgumentParser(description="比較不同 AI 模型寫商品解說的表現")
@@ -201,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="openai:<模型> 或 local:<Hugging Face 模型>；可以重複。預設比較兩個 Qwen 本機模型，有 OpenAI Key 時再加上 gpt-4o-mini")
     parser.add_argument("--products", type=int, default=10, help="比較幾個商品（預設 10）")
     parser.add_argument("--shop", default=shops.DEFAULT_SHOP, help="用哪個賣場的資料（預設：預設賣場）")
+    parser.add_argument("--demo", action="store_true", help="改用示範賣場（seed 42，和線上 demo 同一份資料；任何人都能重跑）")
+    parser.add_argument("--out", type=Path, default=None, help="結果存到哪裡")
     parser.add_argument("--price-in", type=float, default=DEFAULT_PRICE_IN, help="OpenAI 輸入單價（美元／100 萬 tokens）")
     parser.add_argument("--price-out", type=float, default=DEFAULT_PRICE_OUT, help="OpenAI 輸出單價（美元／100 萬 tokens）")
     args = parser.parse_args(argv)
@@ -218,12 +246,16 @@ def main(argv: list[str] | None = None) -> int:
         print(e, file=sys.stderr)
         return 2
 
-    if args.shop not in shops.list_shops():
+    if args.demo:
+        from shoppilot.llm.qa_eval import demo_analysis
+        analysis = demo_analysis()
+    elif args.shop not in shops.list_shops():
         print(f"找不到賣場「{args.shop}」。目前有：{'、'.join(shops.list_shops())}", file=sys.stderr)
         return 2
-    with closing(db.connect(shops.db_path(args.shop))) as conn:
-        analysis = Analysis(load_dataset(conn), shops.load_config(args.shop, "keywords"),
-                            shops.load_config(args.shop, "rules"))
+    else:
+        with closing(db.connect(shops.db_path(args.shop))) as conn:
+            analysis = Analysis(load_dataset(conn), shops.load_config(args.shop, "keywords"),
+                                shops.load_config(args.shop, "rules"))
     if not analysis.perf_ok:
         print("資料庫裡沒有「商品表現」報表。請先把報表放進 data/inbox/，打開一次 Dashboard 匯入後再執行。", file=sys.stderr)
         return 1
@@ -256,13 +288,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  完成：{sum(r.status == 'ok' for r in rs)} 通過、{sum(r.status == 'blocked' for r in rs)} 被擋、"
               f"{sum(r.status == 'error' for r in rs)} 錯誤")
         unload_all()                               # 換下一個模型前釋放記憶體
+        unload_llamacpp()
     if not results:
         print("沒有任何模型完成比較。", file=sys.stderr)
         return 1
 
     rows = summarize(results, load_seconds, memory, args.price_in, args.price_out)
     md = to_markdown(rows, len(items), _device_note())
-    out_dir = shops.shop_dir(args.shop) / "benchmark" / f"{datetime.now():%Y%m%d-%H%M%S}"
+    base_dir = Path(tempfile.gettempdir()) / "shoppilot_benchmark_demo" if args.demo else shops.shop_dir(args.shop) / "benchmark"
+    out_dir = args.out or base_dir / f"{datetime.now():%Y%m%d-%H%M%S}"
     write_outputs(out_dir, results, md)
     print()
     print(md)

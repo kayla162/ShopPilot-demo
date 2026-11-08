@@ -259,7 +259,7 @@ def _app(tmp_path, monkeypatch, available=True, calls=None):
 def test_qa_tab_calls_ai_only_on_submit(tmp_path, monkeypatch):
     calls = []
     at = _app(tmp_path, monkeypatch, calls=calls)
-    assert not at.exception and at.tabs[-1].label == "AI 問答"
+    assert not at.exception and any(t.label == "AI 問答" for t in at.tabs)
     assert calls == []                                           # 打開頁面、切換分頁都不呼叫
     at.chat_input[0].set_value("哪個商品賣最好？").run()
     assert calls == ["哪個商品賣最好？"]
@@ -274,3 +274,33 @@ def test_qa_tab_disabled_without_ai(tmp_path, monkeypatch):
     at = _app(tmp_path, monkeypatch, available=False)
     assert not at.exception and at.chat_input[0].disabled
     assert any("目前未啟用" in i.value for i in at.info)
+
+
+def test_qa_tab_streams_and_shows_tools(tmp_path, monkeypatch):
+    import dashboard.views.qa_view as qa_view
+    at = _app(tmp_path, monkeypatch)
+    seen = []
+
+    def fake_answer(*a, on_token=None, **k):
+        for piece in ("A9991 ", "賣最好。"):
+            on_token(piece)
+        seen.append(on_token is not None)
+        return Explanation("ok", text="A9991 賣最好。", tools_used=("銷量排行",))
+    monkeypatch.setattr(qa_view, "answer_question", fake_answer)
+    at.chat_input[0].set_value("哪個商品賣最好？").run()
+    assert not at.exception and seen == [True]
+    assert any("AI 查了：銷量排行" in c.value for c in at.caption)
+
+
+def test_monitor_tab_shows_logged_calls(tmp_path, monkeypatch):
+    at = _app(tmp_path, monkeypatch)
+    assert any("還沒有 AI 呼叫紀錄" in i.value for i in at.info)
+    cache = db.SqliteAICache(tmp_path / "shoppilot.db")
+    for ms, status in ((1500, "ok"), (2500, "ok"), (3, "cached"), (900, "blocked")):
+        cache.log_call({"task": "shop_qa", "provider": "local", "model": "qwen", "mode": "tools", "status": status,
+                        "latency_ms": ms, "tokens_in": 800, "tokens_out": 40, "tool_calls": 1, "rounds": 2})
+    at.run()
+    assert not at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["呼叫次數"] == "4" and metrics["快取命中率"] == "25%" and metrics["延遲 p50"] == "1.5 秒"
+    assert metrics["被數字檢查擋下"] == "33%"

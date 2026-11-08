@@ -6,7 +6,7 @@ import pytest
 from shoppilot.llm.explainer import build_ai_input, find_unsupported_numbers
 from shoppilot.llm.qa import build_qa_context
 
-TAB_LABELS = ["總覽", "競品分析", "價格與銷售", "曝光因子", "標題關鍵字", "商品總表", "外部競品", "AI 問答"]
+TAB_LABELS = ["總覽", "競品分析", "價格與銷售", "曝光因子", "標題關鍵字", "商品總表", "外部競品", "AI 問答", "AI 監控"]
 
 
 def check_imports(results, analysis) -> None:
@@ -55,7 +55,9 @@ def check_suggestions(a) -> None:
 
 def check_qa_context(a, max_chars: int = 12000) -> None:
     top = a.regular().sort_values("units", ascending=False).iloc[0]
-    question = f"{top['category']}類和 {top['code'] or top['core_title']} 的表現如何？"
+    # 沒有貨號時 code 是 NaN（NaN 是 truthy，不能用 or）：改用商品名稱問
+    label = top["code"] if isinstance(top["code"], str) and top["code"] else top["core_title"]
+    question = f"{top['category']}類和 {label} 的表現如何？"
     ctx = build_qa_context(a, question, product_id=top["product_id"])
     assert len(json.dumps(ctx, ensure_ascii=False)) <= max_chars
     assert ctx["問題提到的商品的完整分析"]

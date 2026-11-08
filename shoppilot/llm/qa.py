@@ -11,13 +11,17 @@ import json
 import re
 from pathlib import Path
 
-from shoppilot.llm.base import KIND_LABELS, UNAVAILABLE_MSG, LLMError, LLMProvider
+from shoppilot.llm import telemetry
+from shoppilot.llm.base import KIND_LABELS, UNAVAILABLE_MSG, LLMError, LLMProvider, OnToken, complete
 from shoppilot.llm.explainer import (
     BLOCKED_MSG, AICache, Explanation, build_ai_input, find_unsupported_numbers, input_hash,
 )
 
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa.md"
+TOOLS_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "shop_qa_tools.md"
 QA_VERSION = "qa6"          # 改了 qa.md 或資料表的內容就換版本號，舊的快取才不會被誤用
+QA_TOOLS_VERSION = "qt4"    # 工具呼叫的做法：改了 shop_qa_tools.md、工具或迴圈就換版本號
+MODES = ("table", "tools")  # table：每題送一份資料表；tools：模型自己呼叫工具查資料（見 qa_tools.py）
 MAX_QUESTION_LEN = 200
 TOP_SELLERS = 10
 MAX_PRODUCTS = 3            # 問題裡提到的商品最多附幾個完整分析（問到「這個商品」時再加上側欄選的商品）
@@ -37,6 +41,15 @@ SELECTED_LABEL = "使用者在側欄選的商品（問題裡的「這個」「�
 
 def load_qa_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def load_tools_prompt() -> str:
+    return TOOLS_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def qa_mode(cfg: dict) -> str:
+    mode = str(cfg.get("qa_mode", "table"))
+    return mode if mode in MODES else "table"
 
 
 def _r(x, digits: int = 1):
@@ -198,8 +211,25 @@ def _product_detail(analysis, pid: str) -> dict | None:
     return detail
 
 
+def _cached(cache: AICache, digest: str):
+    try:
+        cached = cache.get(digest)
+    except Exception:  # noqa: BLE001 — 快取壞掉就當作沒有快取
+        return None
+    text = cached.get("output_text") if isinstance(cached, dict) else None
+    return cached if isinstance(text, str) and text.strip() else None
+
+
+def _tools_used(cached: dict) -> tuple[str, ...]:
+    try:
+        meta = json.loads(cached.get("input_json") or "{}")
+    except (TypeError, ValueError):
+        return ()
+    return tuple(meta.get("tools_used") or ()) if isinstance(meta, dict) else ()
+
+
 def _answer(analysis, question: str, product_id, provider: LLMProvider | None, cache: AICache,
-            cfg: dict) -> Explanation:
+            cfg: dict, on_token: OnToken | None = None, clock=telemetry.now) -> Explanation:
     question = (question or "").strip()
     if not question:
         return Explanation("unavailable", message="請輸入問題")
@@ -207,25 +237,29 @@ def _answer(analysis, question: str, product_id, provider: LLMProvider | None, c
         return Explanation("unavailable", message=f"問題最多 {MAX_QUESTION_LEN} 個字")
     if provider is None:
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason="AI 文字解釋目前未啟用")
+    if qa_mode(cfg) == "tools":
+        return _answer_tools(analysis, question, product_id, provider, cache, cfg, on_token, clock)
+    call = telemetry.Call("shop_qa", provider, "table", clock=clock)
     ctx = build_qa_context(analysis, question, product_id)
     version = f"{cfg.get('prompt_version', 'v1')}|{QA_VERSION}"
     digest = input_hash({"context": ctx, "question": question}, provider.model, version)
-    try:
-        cached = cache.get(digest)
-    except Exception:  # noqa: BLE001 — 快取壞掉就當作沒有快取
-        cached = None
-    text = cached.get("output_text") if isinstance(cached, dict) else None
-    if isinstance(text, str) and text.strip():
-        return Explanation("cached", text=text, tokens_in=cached.get("tokens_in"), tokens_out=cached.get("tokens_out"))
+    cached = _cached(cache, digest)
+    if cached:
+        call.finish(cache, "cached", tokens_in=cached.get("tokens_in"), tokens_out=cached.get("tokens_out"))
+        return Explanation("cached", text=cached["output_text"], tokens_in=cached.get("tokens_in"),
+                           tokens_out=cached.get("tokens_out"))
     user = "資料：\n" + json.dumps(ctx, ensure_ascii=False, separators=(",", ":")) + f"\n\n問題：{question}"
     try:
-        reply = provider.generate(load_qa_prompt(), user)
+        reply = complete(provider, load_qa_prompt(), user, on_token)
     except LLMError as e:
+        call.finish(cache, "error", error_kind=e.kind)
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS.get(e.kind, KIND_LABELS["unknown"]))
     except Exception:  # noqa: BLE001
+        call.finish(cache, "error", error_kind="unknown")
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
     bad = find_unsupported_numbers(reply.text, {"context": ctx, "question": question})
     if bad:
+        call.finish(cache, "blocked", tokens_in=reply.tokens_in, tokens_out=reply.tokens_out, rounds=1)
         return Explanation("blocked", message=BLOCKED_MSG, reason="、".join(bad))
     try:
         cache.put({"task": "shop_qa", "entity_id": product_id, "input_hash": digest, "input_json": user,
@@ -233,13 +267,57 @@ def _answer(analysis, question: str, product_id, provider: LLMProvider | None, c
                    "tokens_in": reply.tokens_in, "tokens_out": reply.tokens_out})
     except Exception:  # noqa: BLE001
         pass
+    call.finish(cache, "ok", tokens_in=reply.tokens_in, tokens_out=reply.tokens_out, rounds=1)
     return Explanation("ok", text=reply.text, tokens_in=reply.tokens_in, tokens_out=reply.tokens_out)
 
 
-def answer_question(analysis, question: str, product_id: str | None, provider: LLMProvider | None,
-                    cache: AICache, cfg: dict) -> Explanation:
-    """不丟例外：任何錯誤都只回傳固定訊息（例外文字可能含 Key 的片段，不顯示）。"""
+def _answer_tools(analysis, question: str, product_id, provider, cache: AICache, cfg: dict,
+                  on_token: OnToken | None, clock) -> Explanation:
+    from shoppilot.llm.qa_tools import ShopTools, describe_call, run_tools
+
+    call = telemetry.Call("shop_qa", provider, "tools", clock=clock)
+    tools = ShopTools(analysis, product_id)
+    version = f"{cfg.get('prompt_version', 'v1')}|{QA_TOOLS_VERSION}"
+    digest = input_hash({"mode": "tools", "question": question, "data": tools.fingerprint()}, provider.model, version)
+    cached = _cached(cache, digest)
+    if cached:
+        call.finish(cache, "cached", tokens_in=cached.get("tokens_in"), tokens_out=cached.get("tokens_out"))
+        return Explanation("cached", text=cached["output_text"], tokens_in=cached.get("tokens_in"),
+                           tokens_out=cached.get("tokens_out"), tools_used=_tools_used(cached))
     try:
-        return _answer(analysis, question, product_id, provider, cache, cfg)
+        if not callable(getattr(provider, "chat", None)):
+            raise LLMError("bad_request", "這個 provider 不支援工具呼叫")
+        run = run_tools(tools, question, provider, load_tools_prompt(), on_token)
+    except LLMError as e:
+        call.finish(cache, "error", error_kind=e.kind)
+        return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS.get(e.kind, KIND_LABELS["unknown"]))
+    except Exception:  # noqa: BLE001
+        call.finish(cache, "error", error_kind="unknown")
+        return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
+    used = tuple(describe_call(n, a) for n, a in run.calls)
+    stats = {"tokens_in": run.tokens_in, "tokens_out": run.tokens_out, "tool_calls": len(run.calls),
+             "rounds": run.rounds}
+    bad = find_unsupported_numbers(run.text, {"results": run.results, "question": question})
+    if bad:
+        call.finish(cache, "blocked", **stats)
+        return Explanation("blocked", message=BLOCKED_MSG, reason="、".join(bad), tools_used=used)
+    try:
+        cache.put({"task": "shop_qa", "entity_id": product_id, "input_hash": digest,
+                   "input_json": json.dumps({"mode": "tools", "question": question, "tools_used": used,
+                                             "messages": run.messages}, ensure_ascii=False, default=str),
+                   "output_text": run.text, "model": provider.model, "prompt_version": version,
+                   "tokens_in": run.tokens_in, "tokens_out": run.tokens_out})
+    except Exception:  # noqa: BLE001
+        pass
+    call.finish(cache, "ok", **stats)
+    return Explanation("ok", text=run.text, tokens_in=run.tokens_in, tokens_out=run.tokens_out, tools_used=used)
+
+
+def answer_question(analysis, question: str, product_id: str | None, provider: LLMProvider | None,
+                    cache: AICache, cfg: dict, on_token: OnToken | None = None) -> Explanation:
+    """不丟例外：任何錯誤都只回傳固定訊息（例外文字可能含 Key 的片段，不顯示）。
+    on_token：串流顯示最後的回答（工具呼叫的那幾輪不顯示）。"""
+    try:
+        return _answer(analysis, question, product_id, provider, cache, cfg, on_token)
     except Exception:  # noqa: BLE001 — AI 的任何錯誤都不可以影響核心分析
         return Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])

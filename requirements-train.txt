@@ -1,0 +1,7 @@
+# 選用：LoRA 微調（scripts/train_lora.py）。需要 NVIDIA 顯示卡，torch 要裝 CUDA 版：
+#   pip install torch --index-url https://download.pytorch.org/whl/cu130   （依 CUDA 版本，見 https://pytorch.org/get-started/locally/）
+torch>=2.4
+transformers>=4.56
+peft>=0.17
+accelerate>=1.0
+bitsandbytes>=0.45      # --qlora（4-bit 原本的權重）

@@ -4,3 +4,5 @@ torch>=2.4
 transformers>=4.56
 # 選用：外部競品自動配對要用 embedding 模型（config/rules.yaml 的 matching.scorer 不是 bigram）才需要
 sentence-transformers>=3.0
+# 選用：載入 LoRA 微調的權重（config/llm.yaml 的 local.adapter）
+peft>=0.17

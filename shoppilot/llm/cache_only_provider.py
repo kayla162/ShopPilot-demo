@@ -16,3 +16,6 @@ class CacheOnlyProvider:
 
     def generate(self, system: str, user: str) -> LLMReply:
         raise LLMError("cache_only")
+
+    def chat(self, messages, tools=None, on_token=None) -> LLMReply:
+        raise LLMError("cache_only")

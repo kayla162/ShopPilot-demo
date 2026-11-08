@@ -20,6 +20,7 @@ def test_env_switches_provider_without_touching_config():
     assert cfg["provider"] == "cache_only" and CFG["provider"] == "local"
     assert with_env_provider(CFG, {}) is CFG
     assert with_env_provider(CFG, {"SHOPPILOT_LLM_PROVIDER": ""}) is CFG
+    assert with_env_provider(CFG, {"SHOPPILOT_QA_MODE": "tools"})["qa_mode"] == "tools"
 
 
 def test_cache_only_uses_local_model_name_so_cache_keys_match():

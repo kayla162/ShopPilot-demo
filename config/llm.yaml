@@ -2,11 +2,12 @@
 # 預設用本機模型（不用 API Key、資料不離開電腦）；改用 OpenAI 時，API Key 請放在環境變數 OPENAI_API_KEY
 # 或專案根目錄的 .env（OPENAI_API_KEY=...），不要寫在這裡。
 enabled: true            # false：完全停用 AI
-provider: local          # local（本機 Hugging Face 模型，見下方 local）| openai | none
+provider: local          # local（本機 Hugging Face 模型，見下方 local）| llamacpp（量化模型，見下方 llamacpp）| openai | none
 model: gpt-4o-mini       # provider: openai 時用的模型，可以改成你帳號可用的其他模型
 max_output_tokens: 400   # 每次最多產生多少 token（控制成本；本機模型則控制等待時間）
 timeout_seconds: 20
 prompt_version: v2       # 改了 prompt 或數字檢查規則就換版本號，舊的快取才不會被誤用
+qa_mode: table           # AI 問答的做法：table（每題送一份資料表）| tools（模型自己呼叫工具查資料，見 shoppilot/llm/qa_tools.py）
 
 # provider: local 時使用。需要另外安裝：pip install -r requirements-local.txt
 # 第一次按「AI 分析」會從 Hugging Face 下載模型（1.5B 約 3 GB）並載入，要等幾分鐘；之後不用網路。
@@ -16,3 +17,13 @@ local:
   dtype: auto            # auto（顯示卡 float16、CPU float32）| float32 | float16 | bfloat16
   temperature: 0         # 0：每次挑最可能的字，結果固定、最不容易亂寫數字；> 0 越大越有變化
   offline: false         # true：只用已下載的模型、完全不連網（外出展示時可以打開）
+  adapter:               # LoRA 微調的權重資料夾（scripts/train_lora.py 的輸出，例如 models/shoppilot-tools-lora）；空白＝不用
+
+# provider: llamacpp 時使用（量化模型，GGUF 格式）。需要另外安裝：pip install -r requirements-quant.txt
+# CPU 上比 local 的 float32 快很多、記憶體少一半以上；prompt 和 local 完全相同（用同一個 tokenizer 的 chat template）
+llamacpp:
+  repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF        # Qwen 官方的量化版本
+  file: qwen2.5-1.5b-instruct-q4_k_m.gguf      # q4_k_m（約 1.1 GB）| q8_0（約 1.9 GB，較接近原本的模型）
+  path:                  # 已經有 GGUF 檔的話填本機路徑（填了就不下載）
+  n_ctx: 8192            # 最長的輸入＋輸出 tokens
+  n_gpu_layers: 0        # 0：只用 CPU；有 GPU 版的 llama-cpp-python 時可以放幾層到顯示卡

@@ -12,7 +12,8 @@ if str(ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from dashboard.views import (  # noqa: E402
-    common, competitor, exposure_view, external, header, keywords_view, overview, price_sales, products_view, qa_view,
+    ai_monitor, common, competitor, exposure_view, external, header, keywords_view, overview, price_sales, products_view,
+    qa_view,
 )
 from shoppilot import config, db, pipeline, shops  # noqa: E402
 from shoppilot.analytics.products import selection_order  # noqa: E402
@@ -23,7 +24,8 @@ from shoppilot.llm.local_provider import TransformersProvider  # noqa: E402
 
 TABS = [("總覽", overview.render), ("競品分析", competitor.render), ("價格與銷售", price_sales.render),
         ("曝光因子", exposure_view.render), ("標題關鍵字", keywords_view.render),
-        ("商品總表", products_view.render), ("外部競品", external.render), ("AI 問答", qa_view.render)]
+        ("商品總表", products_view.render), ("外部競品", external.render), ("AI 問答", qa_view.render),
+        ("AI 監控", ai_monitor.render)]
 
 # 數值太長時換行，不要被截成「…」
 # Streamlit 1.66 把數值放在 <div><p> 裡，<p> 的 nowrap 來自比這裡更具體的樣式，所以連同裡面所有元素一起改、

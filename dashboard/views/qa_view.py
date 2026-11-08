@@ -19,15 +19,21 @@ CACHE_ONLY_HINT = ("線上 demo 只提供預先算好的答案（免費主機跑
                    "要自己提問，請在本機或用 Docker 執行（見 README）。")
 
 
+def _answer_md(text: str) -> str:
+    # 小模型常不照規定加粗；跳脫後會顯示成「**」，先拿掉（換行、條列照原樣）
+    return common.md_escape(text.replace("**", "")).replace("\n", "  \n")
+
+
 def _show(msg: dict) -> None:
     with st.chat_message(msg["role"]):
         if msg["role"] == "user":
             st.markdown(common.md_escape(msg["text"]))
             return
         result: Explanation = msg["result"]
+        if result.tools_used:
+            st.caption("AI 查了：" + common.md_escape("、".join(result.tools_used)))
         if result.status in ("ok", "cached"):
-            # 小模型常不照規定加粗；跳脫後會顯示成「**」，先拿掉（換行、條列照原樣）
-            st.markdown(common.md_escape(result.text.replace("**", "")).replace("\n", "  \n"))
+            st.markdown(_answer_md(result.text))
             if result.status == "cached":
                 st.caption("快取結果：同樣的問題和資料問過了，沒有重新呼叫 AI")
         else:
@@ -73,13 +79,24 @@ def render(ctx: common.Ctx) -> None:
         question, product_id = clicked, examples["product_id"]
     if not question:
         return
-    local = ctx.llm_cfg.get("provider") == "local"
-    with st.spinner(WAIT_MSG if local else "AI 思考中…"):
-        try:
-            result = answer_question(ctx.analysis, question, product_id, make_provider(ctx.llm_cfg),
-                                     SqliteAICache(ctx.db_path), ctx.llm_cfg)
-        except Exception:  # noqa: BLE001 — AI 設定或快取出錯也只停在這個分頁
-            result = Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
+    local = ctx.llm_cfg.get("provider") in ("local", "llamacpp")
+    with st.chat_message("user"):
+        st.markdown(common.md_escape(question))
+    with st.chat_message("assistant"):
+        box = st.empty()
+        streamed: list[str] = []
+
+        def on_token(piece: str) -> None:
+            # 一邊產生一邊顯示；數字檢查要等整段寫完才做，沒通過時重新整理後會換成擋下的訊息
+            streamed.append(piece)
+            box.markdown(_answer_md("".join(streamed)) + " ▌")
+
+        with st.spinner(WAIT_MSG if local else "AI 思考中…"):
+            try:
+                result = answer_question(ctx.analysis, question, product_id, make_provider(ctx.llm_cfg),
+                                         SqliteAICache(ctx.db_path), ctx.llm_cfg, on_token=on_token)
+            except Exception:  # noqa: BLE001 — AI 設定或快取出錯也只停在這個分頁
+                result = Explanation("unavailable", message=UNAVAILABLE_MSG, reason=KIND_LABELS["unknown"])
     history += [{"role": "user", "text": question}, {"role": "assistant", "result": result}]
     st.session_state[key] = history[-MAX_HISTORY:]
     st.rerun()
