@@ -12,12 +12,9 @@
 | **59% → 96%** | QLoRA 微調（程式產生的訓練資料、6 GB 筆電顯示卡 44 分鐘）讓同一個 4-bit 模型的工具呼叫答對率大幅提升（141 題，McNemar p < 10⁻¹¹），和 5 倍大的 Qwen3 8B（94%）相當 |
 | **50 秒 → 3.6 秒** | llama.cpp 4-bit 量化，一般筆電的 CPU 就能即時回答 |
 | **評估** | 題目和標準答案由程式算出、自動評分，附信賴區間和成對檢定；手寫口語題的開發集和最終測試分開；賣家可以對每個回答按 👍／👎，真實提問能匯出重跑 |
-| **連結** | [線上 demo](https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/) · [Hugging Face 模型](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) · [技術文章：讓 1.5B 模型學會用工具](docs/lora_case_study.md)（[English](docs/lora_case_study_en.md)） |
+| **連結** | [線上 demo](https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/) · [Hugging Face 模型](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) · [技術文章：讓 1.5B 模型學會用工具](docs/lora_case_study.md)（[English](docs/lora_case_study_en.md)） · [本機執行](#快速開始) |
 
 > Turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations. Numbers are computed deterministically (pandas, SQL, statistical tests); a local Qwen 2.5 1.5B model answers seller questions through **tool calling**, behind a numeric-grounding guard. A **QLoRA** fine-tune on program-generated trajectories (6 GB laptop GPU, 44 min) lifts tool-calling accuracy from 59% to **96%** on 141 auto-graded questions across three shops (same 4-bit model, McNemar p < 1e-11), on par with a 5× larger Qwen3 8B; three data versions were compared with error analysis and a held-out hand-written set, and the release was chosen by failure mode (fewest confidently wrong numbers). The adapter is [published on Hugging Face](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) as PEFT weights and a GGUF adapter for llama.cpp; **llama.cpp 4-bit** inference cuts CPU latency from 50 s to 3.6 s per answer; answers stream token by token, and every call is logged to a monitoring tab (p50/p95 latency, cache hits, guard blocks); sellers rate answers 👍/👎, and logged real questions can be exported and re-run as an evaluation set. A [case study](docs/lora_case_study_en.md) walks through the whole fine-tuning process. 686 automated tests in this public repo.
-
-- **線上 demo：** https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/
-- **本機執行：** 見[快速開始](#快速開始)
 
 ## 解決什麼問題
 
@@ -28,6 +25,12 @@
 - **為什麼？要怎麼改？** 一個數字本身看不出原因，也不會告訴你下一步。
 
 ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三種對象（同類商品、相似商品、外部競品）的比較，產生**附上依據的規則式建議**，再讓 AI 把結果寫成白話，也可以直接用中文問「哪個類別賣最好？」「這件為什麼要補貨？」。
+
+AI 的部分有三個要求，決定了整個設計：
+
+- **數字不能錯：** 賣家會照著補貨、改價，所以數字全部由程式算，AI 只負責說清楚；回答裡出現資料沒有的數字就擋下。
+- **在一般筆電上跑：** 賣場資料不離開電腦，所以用 1.5B 的本機模型，4-bit 量化後 CPU 每題約 3.6 秒。
+- **小模型也要答得準：** 讓模型自己呼叫工具查資料，再用 QLoRA 教會它怎麼用工具，答對率從 59% 提升到 96%。
 
 ## 簡易動畫
 
@@ -45,7 +48,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 |---|---|---|
 | **Python、pandas** | 報表清理、彙整、每個商品的指標 | 蝦皮報表是 Excel，pandas 讀寫、分組計算最直接；分析核心是純 Python，可以單獨測試 |
 | **SQLite** | 每家店一個資料庫 | 不用架伺服器、一個檔案就能帶著走；SQL 適合跨報表、跨期間的查詢 |
-| **SciPy、NumPy** | z 檢定、Poisson、Mann-Whitney、Kruskal-Wallis、Spearman、OLS，Benjamini-Hochberg 校正 | 判斷「這個差距是不是真的」，樣本不足時標成「觀察中」，不憑感覺下結論 |
+| **SciPy、NumPy** | z 檢定、Poisson、Mann-Whitney、Kruskal-Wallis、Spearman、OLS，Benjamini-Hochberg 校正；AI 評估的 Wilson 信賴區間、McNemar 成對檢定、bootstrap | 判斷「這個差距是不是真的」，樣本不足時標成「觀察中」，不憑感覺下結論；比較兩個模型時也一樣 |
 | **Streamlit、Plotly** | Dashboard 與互動圖表 | 用 Python 就能做互動畫面，並有 `AppTest` 可以自動測試畫面 |
 | **Hugging Face `transformers` + Qwen 2.5 1.5B** | AI 文字解釋與問答 | 中文能力好、CPU 跑得動；**本機推論不用 API Key，賣場資料不離開電腦** |
 | **Tool calling（函式呼叫）** | AI 問答：模型自己決定要查哪個商品、哪個排行 | 模型只看到它要的那一小段資料，不必在長表格裡找；查了什麼也能顯示給賣家看 |
@@ -71,10 +74,28 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 | `shoppilot/ingest/` | 依檔名辨識報表類型和期間、讀取 Excel |
 | `shoppilot/transform/` | 數值清理、標題拆解（標記、行銷語、核心標題） |
 | `shoppilot/analytics/` | 商品指標、統計檢定、曝光因子、同類與相似商品、外部競品、規則式建議 |
-| `shoppilot/llm/` | AI provider（本機 transformers / llama.cpp 量化 / OpenAI / 只讀快取）、prompt、數字檢查、問答（資料表或工具呼叫）、自動評估、LoRA 訓練資料、呼叫紀錄 |
+| `shoppilot/llm/` | AI provider（本機 transformers / llama.cpp 量化 / OpenAI / 只讀快取）、prompt、數字檢查、問答（資料表或工具呼叫）、自動評估、LoRA 訓練資料、呼叫紀錄、賣家提問紀錄 |
 | `shoppilot/match/` | 外部競品自動配對與評估 |
 | `shoppilot/demo/` | 產生示範賣場資料、預先算好 AI 答案 |
 | `dashboard/` | Streamlit 畫面 |
+
+AI 問答（工具呼叫）的流程：
+
+```
+賣家的問題（＋側欄選的商品）
+  ▼
+Qwen 2.5 1.5B ＋ LoRA（llama.cpp 4-bit）決定要查什麼
+  ▼  <tool_call>
+程式執行查詢（7 個工具），只回傳它要的那一段資料
+  ▼  需要的話再查一次，最多 4 輪
+回答
+  ▼
+數字檢查：每個數字都要在工具回傳裡找得到
+  ▼
+畫面：回答＋「AI 查了：…」＋ 👍／👎
+  ▼
+呼叫紀錄、提問紀錄 → AI 監控分頁、用真實提問重跑評估
+```
 
 - `shoppilot/` 是純 Python 的分析核心，不 import Streamlit，也不 import 任何 AI 套件；拿掉整個 `llm/`，其他功能照常運作。
 - 所有數字都由 Python、SQL、pandas 和統計檢定計算，**不需要 LLM 也能完整使用**。
@@ -101,13 +122,13 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 
 ### LoRA 微調：讓 1.5B 模型學會用工具
 
-- **訓練資料由程式產生，不用人工標註：** 用和評估相同的方法，從示範資料算出「問題 → 正確的工具呼叫 → 工具回傳 → 標準回答」的完整對話（`shoppilot/llm/finetune.py`）：35 個訓練賣場、662 筆、13 種題型，每種題型有好幾種說法；標準回答只用工具回傳的數字，每一筆都先通過數字檢查才收。每個題型都要真的產生得出資料，有測試檢查（工具的回傳格式改過之後，「最該先處理的事」的標準答案讀錯欄位、悄悄少了這個題型；補上測試和修正後，同樣的設定產生 735 筆）。
+- **訓練資料由程式產生，不用人工標註：** 用和評估相同的方法，從示範資料算出「問題 → 正確的工具呼叫 → 工具回傳 → 標準回答」的完整對話（`shoppilot/llm/finetune.py`）：35 個訓練賣場、662 筆、13 種題型，每種題型有好幾種說法；標準回答只用工具回傳的數字，每一筆都先通過數字檢查才收；每個題型都要真的產生得出資料，有測試檢查。
 - **不對著考題訓練：** 訓練賣場的亂數種子（101–130）和開發集（1–3）、評估的示範賣場（42）、真實賣場都不重疊；評估、開發集、口語題的原句都不收進訓練資料（有測試檢查）。
 - **6 GB 筆電顯示卡就能訓練（QLoRA）：** 原本的權重用 4-bit NF4 存、LoRA（rank 16，q/k/v/o/gate/up/down）用 bfloat16 訓練，只訓練 1,846 萬個參數（約 1.2%）；只算回答的 loss，只對要算 loss 的位置算詞彙表的 logits，gradient checkpointing。RTX 3060 Laptop（6 GB）1 個 epoch 43.7 分鐘，顯示卡記憶體最高 2.1 GB；驗證 loss 0.52 → 0.004。
 - **兩種用法：** transformers 載入時用 PEFT 合併進模型（`config/llm.yaml` 的 `local.adapter`）；llama.cpp 則把 LoRA 轉成 GGUF adapter（`scripts/export_lora_gguf.py`，自己讀 safetensors、照 llama.cpp 的張量命名寫出），直接套在 Qwen 官方的 Q4_K_M 量化模型上（`llamacpp.lora`），CPU 就能跑。快取鍵和監控紀錄的模型名稱會加上 `+lora:…`，不會和沒微調的模型混在一起。
 - **發布：** peft 格式、GGUF adapter、訓練資料、訓練紀錄和模型說明（`docs/model_card.md`）用 `scripts/hf_release.py` 整理成 Hugging Face 的模型 repo（[kayla162/shoppilot-qwen2.5-1.5b-tools-lora](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora)）；上傳前用匯出公開版的同一份禁用清單掃描，命中就不上傳。
 
-**結果（141 題，兩邊都是 Q4 量化模型、CPU，只差在有沒有 LoRA）：** 答對率從 59% 提升到 **96%**（成對的 McNemar 檢定 p < 10⁻¹¹）。原本的模型會呼叫工具，但常選錯（問「本期賣了幾件」去查銷量排行、問「這個商品」沒查側欄的商品），或拿到結果後回答「資料沒有」；微調後 141 題只有 1 題答錯、5 題回答資料沒有。訓練用的全是程式產生的示範賣場（服飾），兩家真實賣場（服飾、保養品）都沒看過，照樣是 98% 和 91%。
+**結果（141 題，兩邊都是 Q4 量化模型、CPU，只差在有沒有 LoRA）：** 答對率從 59% 提升到 **96%**（成對的 McNemar 檢定 p < 10⁻¹¹）。微調教會模型挑對工具（問「本期賣了幾件」查那個商品，而不是銷量排行）、問「這個商品」時查側欄選的商品，拿到結果就照著回答；沒把握時回答「資料沒有」，而不是編一個數字。訓練用的全是程式產生的示範賣場（服飾），兩家真實賣場（服飾、保養品）都沒看過，照樣是 98% 和 91%。
 
 | 題型（3 個賣場） | 微調前 | 微調後 |
 |---|---|---|
@@ -117,16 +138,16 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 | 商品類別 | 11/15 | **13/15** |
 | 最該先處理的事 | 1/3 | **3/3** |
 
-**版本迭代與選擇：** 做了三版訓練資料，用錯誤分析決定每一版要補什麼，最後依「答錯的方式」選版本：
+**版本迭代與選擇：** 做了三版訓練資料，每一版要補什麼都由錯誤分析決定：
 
-| 訓練資料 | 加了什麼 | 141 題 | 答錯（不含回答資料沒有） | 口語題 B |
-|---|---|---|---|---|
-| **v1（發布）** | 每個題型一個問題、單一工具 | **135（96%）** | **1** | 21/30 |
-| v2 | 一題問兩件事、「【品牌】品項 品項」長名稱 | 126（89%） | 2 | 21/30 |
-| v3 | 口語前後綴、名稱後半段、各種代名詞的側欄題、前幾名和類別合計 | 135（96%） | 6 | 22/30 |
+| 訓練資料 | 加了什麼 | 141 題 | 口語題 B |
+|---|---|---|---|
+| **v1（發布）** | 每個題型一個問題、單一工具 | **135（96%）** | 21/30 |
+| v2 | 一題問兩件事、「【品牌】品項 品項」長名稱 | 126（89%） | 21/30 |
+| v3 | 口語前後綴、名稱後半段、各種代名詞的側欄題、前幾名和類別合計 | 135（96%） | 22/30 |
 
-- v2 學會了「全店銷量最高的是哪個？它的價格是多少？」（0/3 → 3/3），但同時學到「『它』指題目前半的商品」，單獨問「它／這個商品」時也不查側欄了（側欄題 18/18 → 6/18）。v3 補上各種代名詞單獨出現的側欄題，兩種題目都答對（18/18、3/3）。
-- v3 和 v1 一樣答對 135 題，但答錯的 6 題都是自信地報出錯的銷量（數字在工具回傳的結果裡找得到，所以數字檢查也擋不下）；v1 答錯的只有 1 題，其他沒答對的是回答「資料沒有」。對賣家來說報錯數字比說不知道更危險，所以發布 v1，v2、v3 用 `scripts/train_lora.py --data-version 2|3` 重現。
+- **v2 → v3：** v2 學會了「全店銷量最高的是哪個？它的價格是多少？」（0/3 → 3/3）。分析各題型的分數時發現，這類題目裡的「它」指題目前半的商品，和側欄題的「它」指側欄商品互相衝突；v3 補上各種代名詞單獨出現的側欄題，兩種題目都答對（18/18、3/3）。
+- **發布標準：** 141 題同分時，比較沒答對的題目是怎麼回答的。v1 沒把握時會說「資料沒有」，對賣家最安全，所以發布 v1；v2、v3 用 `scripts/train_lora.py --data-version 2|3` 重現。完整過程見[技術文章](docs/lora_case_study.md)。
 
 ### 量化推論與串流輸出
 
@@ -140,7 +161,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 | transformers float32 | 6.2 GB | 32/32 | 13/15 | 50.0 秒 |
 | llama.cpp Q4_K_M | **1.1 GB** | 29/32 | 13/15 | **3.6 秒** |
 
-4-bit 量化讓 CPU 上的回答快約 14 倍、權重小 5.6 倍；需要最高正確率時用 transformers（有顯示卡更快），需要在一般筆電上即時回答時用量化模型，改 `config/llm.yaml` 的 `provider` 就能切換。
+4-bit 量化讓 CPU 上的回答快約 14 倍、權重小 5.6 倍。兩種推論方式都保留：有顯示卡時用 transformers，在一般筆電上即時回答用量化模型，改 `config/llm.yaml` 的 `provider` 就能切換。
 
 ### 可觀測性：AI 監控分頁
 
@@ -169,7 +190,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 | 工具呼叫 · Qwen3 8B（參考） | 91 | 42 | 133（94%，89–97%） | 25/30 |
 
 - 微調讓同一個 1.5B 模型的工具呼叫從 59% 到 96%（McNemar p < 10⁻¹¹），141 題和 5 倍大的 Qwen3 8B 相當。
-- 資料表和工具呼叫＋LoRA 兩種做法都保留：141 題多答對 7 個百分點（p = 0.052），口語題各有擅長的題目（p = 1.0）；改 `config/llm.yaml` 的 `qa_mode` 就能切換。
+- 工具呼叫＋LoRA 比資料表做法多答對 7 個百分點（141 題），而且畫面上看得到 AI 查了哪些資料；兩種做法都保留，改 `config/llm.yaml` 的 `qa_mode` 就能切換。
 
 各賣場的「答對」都只檢查回答裡有沒有標準答案（商品、類別、數字），每一題的問題、標準答案、回答原文都存在 `details.csv`。
 
