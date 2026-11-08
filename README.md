@@ -4,7 +4,7 @@
 
 把蝦皮賣家中心的報表變成商品層級的競品分析與優化建議；數字全部由程式計算，本機 AI 模型負責把結果寫成白話。
 
-> Turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations. Numbers are computed deterministically (pandas, SQL, statistical tests); a local Qwen 2.5 1.5B model answers seller questions through **tool calling**, behind a numeric-grounding guard. A **QLoRA** fine-tune on program-generated trajectories (6 GB laptop GPU, 44 min) lifts tool-calling accuracy from 59% to **96%** on 141 auto-graded questions across three shops (same 4-bit model, McNemar p < 1e-11), on par with a 5× larger Qwen3 8B; three data versions were compared with error analysis and a held-out hand-written set, and the release was chosen by failure mode (fewest confidently wrong numbers). The adapter ships as PEFT weights and a GGUF adapter for llama.cpp; **llama.cpp 4-bit** inference cuts CPU latency from 50 s to 3.6 s per answer; answers stream token by token, and every call is logged to a monitoring tab (p50/p95 latency, cache hits, guard blocks). 672 automated tests in this public repo.
+> Turns Shopee seller-center reports into product-level competitor analysis and rule-based recommendations. Numbers are computed deterministically (pandas, SQL, statistical tests); a local Qwen 2.5 1.5B model answers seller questions through **tool calling**, behind a numeric-grounding guard. A **QLoRA** fine-tune on program-generated trajectories (6 GB laptop GPU, 44 min) lifts tool-calling accuracy from 59% to **96%** on 141 auto-graded questions across three shops (same 4-bit model, McNemar p < 1e-11), on par with a 5× larger Qwen3 8B; three data versions were compared with error analysis and a held-out hand-written set, and the release was chosen by failure mode (fewest confidently wrong numbers). The adapter is [published on Hugging Face](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) as PEFT weights and a GGUF adapter for llama.cpp; **llama.cpp 4-bit** inference cuts CPU latency from 50 s to 3.6 s per answer; answers stream token by token, and every call is logged to a monitoring tab (p50/p95 latency, cache hits, guard blocks). 672 automated tests in this public repo.
 
 - **線上 demo：** https://shoppilot-demo-fqegbgf2rvzuah3tzjhqqt.streamlit.app/
 - **本機執行：** 見[快速開始](#快速開始)
@@ -39,7 +39,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 | **Streamlit、Plotly** | Dashboard 與互動圖表 | 用 Python 就能做互動畫面，並有 `AppTest` 可以自動測試畫面 |
 | **Hugging Face `transformers` + Qwen 2.5 1.5B** | AI 文字解釋與問答 | 中文能力好、CPU 跑得動；**本機推論不用 API Key，賣場資料不離開電腦** |
 | **Tool calling（函式呼叫）** | AI 問答：模型自己決定要查哪個商品、哪個排行 | 模型只看到它要的那一小段資料，不必在長表格裡找；查了什麼也能顯示給賣家看 |
-| **PEFT LoRA（QLoRA）** | 微調 1.5B 模型的工具用法，權重公開在 Hugging Face | 只訓練約 1% 的參數，6 GB 筆電顯示卡就能訓練；訓練資料由程式產生，不用人工標註；轉成 GGUF adapter 後直接套在量化模型上 |
+| **PEFT LoRA（QLoRA）** | 微調 1.5B 模型的工具用法，權重公開在 [Hugging Face](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) | 只訓練約 1% 的參數，6 GB 筆電顯示卡就能訓練；訓練資料由程式產生，不用人工標註；轉成 GGUF adapter 後直接套在量化模型上 |
 | **llama.cpp（GGUF 量化）** | CPU 上的快速推論 | 4-bit 量化讓 CPU 回答從數十秒降到幾秒，權重記憶體少一半以上 |
 | **OpenAI 相容 API（選用）** | 同一個 provider 介面的另一種實作（含工具呼叫、串流）；接 OpenAI，或本機的 Ollama、vLLM | 需要更大的模型時改設定檔一行就能切換；評估用它接 Ollama 的 Qwen3 8B 當對照 |
 | **sentence-transformers** | 外部競品自動配對的 embedding 評估 | 和不用模型的字元相似度用同一套指標比較，用數據決定要不要上模型 |
@@ -95,7 +95,7 @@ ShopPilot 把這些報表匯入同一個資料庫，替每個商品算出和三�
 - **不對著考題訓練：** 訓練賣場的亂數種子（101–130）和開發集（1–3）、評估的示範賣場（42）、真實賣場都不重疊；評估、開發集、口語題的原句都不收進訓練資料（有測試檢查）。
 - **6 GB 筆電顯示卡就能訓練（QLoRA）：** 原本的權重用 4-bit NF4 存、LoRA（rank 16，q/k/v/o/gate/up/down）用 bfloat16 訓練，只訓練 1,846 萬個參數（約 1.2%）；只算回答的 loss，只對要算 loss 的位置算詞彙表的 logits，gradient checkpointing。RTX 3060 Laptop（6 GB）1 個 epoch 43.7 分鐘，顯示卡記憶體最高 2.1 GB；驗證 loss 0.52 → 0.004。
 - **兩種用法：** transformers 載入時用 PEFT 合併進模型（`config/llm.yaml` 的 `local.adapter`）；llama.cpp 則把 LoRA 轉成 GGUF adapter（`scripts/export_lora_gguf.py`，自己讀 safetensors、照 llama.cpp 的張量命名寫出），直接套在 Qwen 官方的 Q4_K_M 量化模型上（`llamacpp.lora`），CPU 就能跑。快取鍵和監控紀錄的模型名稱會加上 `+lora:…`，不會和沒微調的模型混在一起。
-- **發布：** peft 格式、GGUF adapter、訓練資料、訓練紀錄和模型說明（`docs/model_card.md`）用 `scripts/hf_release.py` 整理成 Hugging Face 的模型 repo；上傳前用匯出公開版的同一份禁用清單掃描，命中就不上傳。
+- **發布：** peft 格式、GGUF adapter、訓練資料、訓練紀錄和模型說明（`docs/model_card.md`）用 `scripts/hf_release.py` 整理成 Hugging Face 的模型 repo（[kayla162/shoppilot-qwen2.5-1.5b-tools-lora](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora)）；上傳前用匯出公開版的同一份禁用清單掃描，命中就不上傳。
 
 **結果（141 題，兩邊都是 Q4 量化模型、CPU，只差在有沒有 LoRA）：** 答對率從 59% 提升到 **96%**（成對的 McNemar 檢定 p < 10⁻¹¹）。原本的模型會呼叫工具，但常選錯（問「本期賣了幾件」去查銷量排行、問「這個商品」沒查側欄的商品），或拿到結果後回答「資料沒有」；微調後 141 題只有 1 題答錯、5 題回答資料沒有。訓練用的全是程式產生的示範賣場（服飾），兩家真實賣場（服飾、保養品）都沒看過，照樣是 98% 和 91%。
 
@@ -237,7 +237,7 @@ pip install -r requirements-local.txt -r requirements-quant.txt --extra-index-ur
 
 再把 `config/llm.yaml` 的 `provider` 改成 `llamacpp`。
 
-**AI 問答改用工具呼叫＋LoRA（CPU 就能跑）：** 把 `shoppilot-tools-lora-f16.gguf`（下面「自己訓練 LoRA」的輸出）放到 `models/shoppilot-tools-lora/`，`config/llm.yaml` 改成：
+**AI 問答改用工具呼叫＋LoRA（CPU 就能跑）：** 把 `shoppilot-tools-lora-f16.gguf`（從 [Hugging Face](https://huggingface.co/kayla162/shoppilot-qwen2.5-1.5b-tools-lora) 下載，或下面「自己訓練 LoRA」的輸出）放到 `models/shoppilot-tools-lora/`，`config/llm.yaml` 改成：
 
 ```yaml
 provider: llamacpp
